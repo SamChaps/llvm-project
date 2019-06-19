@@ -229,6 +229,110 @@ SourceLocation Expr::getExprLoc() const {
 // Primary Expressions.
 //===----------------------------------------------------------------------===//
 
+static void AssertResultStorageKind(ConstantExpr::ResultStorageKind Kind) {
+  assert((Kind == ConstantExpr::RSK_APValue ||
+          Kind == ConstantExpr::RSK_Int64 || Kind == ConstantExpr::RSK_None) &&
+         "Invalid StorageKind Value");
+}
+
+ConstantExpr::ResultStorageKind
+ConstantExpr::getStorageKind(const APValue &Value) {
+  switch (Value.getKind()) {
+  case APValue::None:
+    return ConstantExpr::RSK_None;
+  case APValue::Int:
+    if (!Value.getInt().needsCleanup())
+      return ConstantExpr::RSK_Int64;
+    LLVM_FALLTHROUGH;
+  default:
+    return ConstantExpr::RSK_APValue;
+  }
+}
+
+void ConstantExpr::DefaultInit(ResultStorageKind StorageKind) {
+  ConstantExprBits.ResultKind = StorageKind;
+  if (StorageKind == RSK_APValue)
+    ::new (getTrailingObjects<APValue>()) APValue();
+}
+
+ConstantExpr::ConstantExpr(Expr *subexpr, ResultStorageKind StorageKind)
+    : FullExpr(ConstantExprClass, subexpr) {
+  DefaultInit(StorageKind);
+}
+
+ConstantExpr *ConstantExpr::Create(const ASTContext &Context, Expr *E,
+                                   ResultStorageKind StorageKind) {
+  assert(!isa<ConstantExpr>(E));
+  AssertResultStorageKind(StorageKind);
+  unsigned Size = totalSizeToAlloc<APValue, uint64_t>(
+      StorageKind == ConstantExpr::RSK_APValue,
+      StorageKind == ConstantExpr::RSK_Int64);
+  void *Mem = Context.Allocate(Size, alignof(ConstantExpr));
+  ConstantExpr *Self = new (Mem) ConstantExpr(E, StorageKind);
+  if (StorageKind == ConstantExpr::RSK_APValue)
+    Context.AddAPValueCleanup(&Self->APValueResult());
+  return Self;
+}
+
+ConstantExpr *ConstantExpr::Create(const ASTContext &Context, Expr *E,
+                                   const APValue &Result) {
+  ResultStorageKind StorageKind = getStorageKind(Result);
+  ConstantExpr *Self = Create(Context, E, StorageKind);
+  Self->SetResult(Result);
+  return Self;
+}
+
+ConstantExpr::ConstantExpr(ResultStorageKind StorageKind, EmptyShell Empty)
+    : FullExpr(ConstantExprClass, Empty) {
+  DefaultInit(StorageKind);
+}
+
+ConstantExpr *ConstantExpr::CreateEmpty(const ASTContext &Context,
+                                        ResultStorageKind StorageKind,
+                                        EmptyShell Empty) {
+  AssertResultStorageKind(StorageKind);
+  unsigned Size = totalSizeToAlloc<APValue, uint64_t>(
+      StorageKind == ConstantExpr::RSK_APValue,
+      StorageKind == ConstantExpr::RSK_Int64);
+  void *Mem = Context.Allocate(Size, alignof(ConstantExpr));
+  ConstantExpr *Self = new (Mem) ConstantExpr(StorageKind, Empty);
+  if (StorageKind == ConstantExpr::RSK_APValue)
+    Context.AddAPValueCleanup(&Self->APValueResult());
+  return Self;
+}
+
+void ConstantExpr::MoveIntoResult(APValue &Value) {
+  assert(getStorageKind(Value) == ConstantExprBits.ResultKind &&
+         "Invalid storage for this value kind");
+  switch (ConstantExprBits.ResultKind) {
+  case RSK_None:
+    return;
+  case RSK_Int64:
+    Int64Result() = *Value.getInt().getRawData();
+    ConstantExprBits.BitWidth = Value.getInt().getBitWidth();
+    ConstantExprBits.IsUnsigned = Value.getInt().isUnsigned();
+    return;
+  case RSK_APValue:
+    APValueResult() = std::move(Value);
+    return;
+  }
+  llvm_unreachable("Invalid ResultKind Bits");
+}
+
+APValue ConstantExpr::getAPValueResult() const {
+  switch (ConstantExprBits.ResultKind) {
+  case ConstantExpr::RSK_APValue:
+    return APValueResult();
+  case ConstantExpr::RSK_Int64:
+    return APValue(
+        llvm::APSInt(llvm::APInt(ConstantExprBits.BitWidth, Int64Result()),
+                     ConstantExprBits.IsUnsigned));
+  case ConstantExpr::RSK_None:
+    return APValue();
+  }
+  llvm_unreachable("invalid ResultKind");
+}
+
 /// Compute the type-, value-, and instantiation-dependence of a
 /// declaration reference
 /// based on the declaration being referenced.
@@ -344,7 +448,8 @@ void DeclRefExpr::computeDependence(const ASTContext &Ctx) {
 DeclRefExpr::DeclRefExpr(const ASTContext &Ctx, ValueDecl *D,
                          bool RefersToEnclosingVariableOrCapture, QualType T,
                          ExprValueKind VK, SourceLocation L,
-                         const DeclarationNameLoc &LocInfo)
+                         const DeclarationNameLoc &LocInfo,
+                         NonOdrUseReason NOUR)
     : Expr(DeclRefExprClass, T, VK, OK_Ordinary, false, false, false, false),
       D(D), DNLoc(LocInfo) {
   DeclRefExprBits.HasQualifier = false;
@@ -353,6 +458,7 @@ DeclRefExpr::DeclRefExpr(const ASTContext &Ctx, ValueDecl *D,
   DeclRefExprBits.HadMultipleCandidates = false;
   DeclRefExprBits.RefersToEnclosingVariableOrCapture =
       RefersToEnclosingVariableOrCapture;
+  DeclRefExprBits.NonOdrUseReason = NOUR;
   DeclRefExprBits.Loc = L;
   computeDependence(Ctx);
 }
@@ -363,7 +469,7 @@ DeclRefExpr::DeclRefExpr(const ASTContext &Ctx,
                          bool RefersToEnclosingVariableOrCapture,
                          const DeclarationNameInfo &NameInfo, NamedDecl *FoundD,
                          const TemplateArgumentListInfo *TemplateArgs,
-                         QualType T, ExprValueKind VK)
+                         QualType T, ExprValueKind VK, NonOdrUseReason NOUR)
     : Expr(DeclRefExprClass, T, VK, OK_Ordinary, false, false, false, false),
       D(D), DNLoc(NameInfo.getInfo()) {
   DeclRefExprBits.Loc = NameInfo.getLoc();
@@ -384,6 +490,7 @@ DeclRefExpr::DeclRefExpr(const ASTContext &Ctx,
     = (TemplateArgs || TemplateKWLoc.isValid()) ? 1 : 0;
   DeclRefExprBits.RefersToEnclosingVariableOrCapture =
       RefersToEnclosingVariableOrCapture;
+  DeclRefExprBits.NonOdrUseReason = NOUR;
   if (TemplateArgs) {
     bool Dependent = false;
     bool InstantiationDependent = false;
@@ -405,30 +512,27 @@ DeclRefExpr::DeclRefExpr(const ASTContext &Ctx,
 
 DeclRefExpr *DeclRefExpr::Create(const ASTContext &Context,
                                  NestedNameSpecifierLoc QualifierLoc,
-                                 SourceLocation TemplateKWLoc,
-                                 ValueDecl *D,
+                                 SourceLocation TemplateKWLoc, ValueDecl *D,
                                  bool RefersToEnclosingVariableOrCapture,
-                                 SourceLocation NameLoc,
-                                 QualType T,
-                                 ExprValueKind VK,
-                                 NamedDecl *FoundD,
-                                 const TemplateArgumentListInfo *TemplateArgs) {
+                                 SourceLocation NameLoc, QualType T,
+                                 ExprValueKind VK, NamedDecl *FoundD,
+                                 const TemplateArgumentListInfo *TemplateArgs,
+                                 NonOdrUseReason NOUR) {
   return Create(Context, QualifierLoc, TemplateKWLoc, D,
                 RefersToEnclosingVariableOrCapture,
                 DeclarationNameInfo(D->getDeclName(), NameLoc),
-                T, VK, FoundD, TemplateArgs);
+                T, VK, FoundD, TemplateArgs, NOUR);
 }
 
 DeclRefExpr *DeclRefExpr::Create(const ASTContext &Context,
                                  NestedNameSpecifierLoc QualifierLoc,
-                                 SourceLocation TemplateKWLoc,
-                                 ValueDecl *D,
+                                 SourceLocation TemplateKWLoc, ValueDecl *D,
                                  bool RefersToEnclosingVariableOrCapture,
                                  const DeclarationNameInfo &NameInfo,
-                                 QualType T,
-                                 ExprValueKind VK,
+                                 QualType T, ExprValueKind VK,
                                  NamedDecl *FoundD,
-                                 const TemplateArgumentListInfo *TemplateArgs) {
+                                 const TemplateArgumentListInfo *TemplateArgs,
+                                 NonOdrUseReason NOUR) {
   // Filter out cases where the found Decl is the same as the value refenenced.
   if (D == FoundD)
     FoundD = nullptr;
@@ -443,8 +547,8 @@ DeclRefExpr *DeclRefExpr::Create(const ASTContext &Context,
 
   void *Mem = Context.Allocate(Size, alignof(DeclRefExpr));
   return new (Mem) DeclRefExpr(Context, QualifierLoc, TemplateKWLoc, D,
-                               RefersToEnclosingVariableOrCapture,
-                               NameInfo, FoundD, TemplateArgs, T, VK);
+                               RefersToEnclosingVariableOrCapture, NameInfo,
+                               FoundD, TemplateArgs, T, VK, NOUR);
 }
 
 DeclRefExpr *DeclRefExpr::CreateEmpty(const ASTContext &Context,
@@ -840,7 +944,7 @@ FloatingLiteral::FloatingLiteral(const ASTContext &C, const llvm::APFloat &V,
 
 FloatingLiteral::FloatingLiteral(const ASTContext &C, EmptyShell Empty)
   : Expr(FloatingLiteralClass, Empty) {
-  setRawSemantics(IEEEhalf);
+  setRawSemantics(llvm::APFloatBase::S_IEEEhalf);
   FloatingLiteralBits.IsExact = false;
 }
 
@@ -853,41 +957,6 @@ FloatingLiteral::Create(const ASTContext &C, const llvm::APFloat &V,
 FloatingLiteral *
 FloatingLiteral::Create(const ASTContext &C, EmptyShell Empty) {
   return new (C) FloatingLiteral(C, Empty);
-}
-
-const llvm::fltSemantics &FloatingLiteral::getSemantics() const {
-  switch(FloatingLiteralBits.Semantics) {
-  case IEEEhalf:
-    return llvm::APFloat::IEEEhalf();
-  case IEEEsingle:
-    return llvm::APFloat::IEEEsingle();
-  case IEEEdouble:
-    return llvm::APFloat::IEEEdouble();
-  case x87DoubleExtended:
-    return llvm::APFloat::x87DoubleExtended();
-  case IEEEquad:
-    return llvm::APFloat::IEEEquad();
-  case PPCDoubleDouble:
-    return llvm::APFloat::PPCDoubleDouble();
-  }
-  llvm_unreachable("Unrecognised floating semantics");
-}
-
-void FloatingLiteral::setSemantics(const llvm::fltSemantics &Sem) {
-  if (&Sem == &llvm::APFloat::IEEEhalf())
-    FloatingLiteralBits.Semantics = IEEEhalf;
-  else if (&Sem == &llvm::APFloat::IEEEsingle())
-    FloatingLiteralBits.Semantics = IEEEsingle;
-  else if (&Sem == &llvm::APFloat::IEEEdouble())
-    FloatingLiteralBits.Semantics = IEEEdouble;
-  else if (&Sem == &llvm::APFloat::x87DoubleExtended())
-    FloatingLiteralBits.Semantics = x87DoubleExtended;
-  else if (&Sem == &llvm::APFloat::IEEEquad())
-    FloatingLiteralBits.Semantics = IEEEquad;
-  else if (&Sem == &llvm::APFloat::PPCDoubleDouble())
-    FloatingLiteralBits.Semantics = PPCDoubleDouble;
-  else
-    llvm_unreachable("Unknown floating semantics");
 }
 
 /// getValueAsApproximateDouble - This returns the value as an inaccurate
@@ -1541,7 +1610,8 @@ UnaryExprOrTypeTraitExpr::UnaryExprOrTypeTraitExpr(
 MemberExpr::MemberExpr(Expr *Base, bool IsArrow, SourceLocation OperatorLoc,
                        ValueDecl *MemberDecl,
                        const DeclarationNameInfo &NameInfo, QualType T,
-                       ExprValueKind VK, ExprObjectKind OK)
+                       ExprValueKind VK, ExprObjectKind OK,
+                       NonOdrUseReason NOUR)
     : Expr(MemberExprClass, T, VK, OK, Base->isTypeDependent(),
            Base->isValueDependent(), Base->isInstantiationDependent(),
            Base->containsUnexpandedParameterPack()),
@@ -1553,6 +1623,7 @@ MemberExpr::MemberExpr(Expr *Base, bool IsArrow, SourceLocation OperatorLoc,
   MemberExprBits.HasQualifierOrFoundDecl = false;
   MemberExprBits.HasTemplateKWAndArgsInfo = false;
   MemberExprBits.HadMultipleCandidates = false;
+  MemberExprBits.NonOdrUseReason = NOUR;
   MemberExprBits.OperatorLoc = OperatorLoc;
 }
 
@@ -1561,7 +1632,7 @@ MemberExpr *MemberExpr::Create(
     NestedNameSpecifierLoc QualifierLoc, SourceLocation TemplateKWLoc,
     ValueDecl *MemberDecl, DeclAccessPair FoundDecl,
     DeclarationNameInfo NameInfo, const TemplateArgumentListInfo *TemplateArgs,
-    QualType T, ExprValueKind VK, ExprObjectKind OK) {
+    QualType T, ExprValueKind VK, ExprObjectKind OK, NonOdrUseReason NOUR) {
   bool HasQualOrFound = QualifierLoc || FoundDecl.getDecl() != MemberDecl ||
                         FoundDecl.getAccess() != MemberDecl->getAccess();
   bool HasTemplateKWAndArgsInfo = TemplateArgs || TemplateKWLoc.isValid();
@@ -1572,8 +1643,8 @@ MemberExpr *MemberExpr::Create(
           TemplateArgs ? TemplateArgs->size() : 0);
 
   void *Mem = C.Allocate(Size, alignof(MemberExpr));
-  MemberExpr *E = new (Mem)
-      MemberExpr(Base, IsArrow, OperatorLoc, MemberDecl, NameInfo, T, VK, OK);
+  MemberExpr *E = new (Mem) MemberExpr(Base, IsArrow, OperatorLoc, MemberDecl,
+                                       NameInfo, T, VK, OK, NOUR);
 
   if (HasQualOrFound) {
     // FIXME: Wrong. We should be looking at the member declaration we found.
@@ -1883,6 +1954,11 @@ ImplicitCastExpr *ImplicitCastExpr::Create(const ASTContext &C, QualType T,
                                            ExprValueKind VK) {
   unsigned PathSize = (BasePath ? BasePath->size() : 0);
   void *Buffer = C.Allocate(totalSizeToAlloc<CXXBaseSpecifier *>(PathSize));
+  // Per C++ [conv.lval]p3, lvalue-to-rvalue conversions on class and
+  // std::nullptr_t have special semantics not captured by CK_LValueToRValue.
+  assert((Kind != CK_LValueToRValue ||
+          !(T->isNullPtrType() || T->getAsCXXRecordDecl())) &&
+         "invalid type for lvalue-to-rvalue conversion");
   ImplicitCastExpr *E =
     new (Buffer) ImplicitCastExpr(T, Kind, Operand, PathSize, VK);
   if (PathSize)

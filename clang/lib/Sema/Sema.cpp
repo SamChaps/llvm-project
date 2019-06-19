@@ -158,6 +158,7 @@ Sema::Sema(Preprocessor &pp, ASTContext &ctxt, ASTConsumer &consumer,
       ThreadSafetyDeclCache(nullptr), VarDataSharingAttributesStack(nullptr),
       CurScope(nullptr), Ident_super(nullptr), Ident___float128(nullptr) {
   TUScope = nullptr;
+  isConstantEvaluatedOverride = false;
 
   LoadedExternalKnownNamespaces = false;
   for (unsigned I = 0; I != NSAPI::NumNSNumberLiteralMethods; ++I)
@@ -587,7 +588,7 @@ static bool ShouldRemoveFromUnused(Sema *SemaRef, const DeclaratorDecl *D) {
     // warn even if the variable isn't odr-used.  (isReferenced doesn't
     // precisely reflect that, but it's a decent approximation.)
     if (VD->isReferenced() &&
-        VD->isUsableInConstantExpressions(SemaRef->Context))
+        VD->mightBeUsableInConstantExpressions(SemaRef->Context))
       return true;
 
     if (VarTemplateDecl *Template = VD->getDescribedVarTemplate())

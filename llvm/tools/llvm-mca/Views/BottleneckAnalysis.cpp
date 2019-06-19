@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Views/BottleneckAnalysis.h"
+#include "llvm/MC/MCInst.h"
 #include "llvm/MCA/Support.h"
 #include "llvm/Support/Format.h"
 
@@ -40,43 +41,38 @@ PressureTracker::PressureTracker(const MCSchedModel &Model)
   }
 
   ResourceUsers.resize(NextResourceUsersIdx);
-  std::fill(ResourceUsers.begin(), ResourceUsers.end(), ~0U);
+  std::fill(ResourceUsers.begin(), ResourceUsers.end(),
+            std::make_pair<unsigned, unsigned>(~0U, 0U));
 }
 
-void PressureTracker::getUniqueUsers(
-    uint64_t ResourceMask, SmallVectorImpl<unsigned> &UniqueUsers) const {
+void PressureTracker::getResourceUsers(uint64_t ResourceMask,
+                                       SmallVectorImpl<User> &Users) const {
   unsigned Index = getResourceStateIndex(ResourceMask);
   unsigned ProcResID = ResIdx2ProcResID[Index];
   const MCProcResourceDesc &PRDesc = *SM.getProcResource(ProcResID);
   for (unsigned I = 0, E = PRDesc.NumUnits; I < E; ++I) {
-    unsigned From = getResourceUser(ProcResID, I);
-    if (find(UniqueUsers, From) == UniqueUsers.end())
-      UniqueUsers.emplace_back(From);
+    const User U = getResourceUser(ProcResID, I);
+    if (U.second && IPI.find(U.first) != IPI.end())
+      Users.emplace_back(U);
   }
 }
 
-void PressureTracker::handleInstructionEvent(const HWInstructionEvent &Event) {
+void PressureTracker::onInstructionDispatched(unsigned IID) {
+  IPI.insert(std::make_pair(IID, InstructionPressureInfo()));
+}
+
+void PressureTracker::onInstructionExecuted(unsigned IID) { IPI.erase(IID); }
+
+void PressureTracker::handleInstructionIssuedEvent(
+    const HWInstructionIssuedEvent &Event) {
   unsigned IID = Event.IR.getSourceIndex();
-  switch (Event.Type) {
-  default:
-    break;
-  case HWInstructionEvent::Dispatched:
-    IPI.insert(std::make_pair(IID, InstructionPressureInfo()));
-    break;
-  case HWInstructionEvent::Executed:
-    IPI.erase(IID);
-    break;
-  case HWInstructionEvent::Issued: {
-    const auto &IIE = static_cast<const HWInstructionIssuedEvent &>(Event);
-    using ResourceRef = HWInstructionIssuedEvent::ResourceRef;
-    using ResourceUse = std::pair<ResourceRef, ResourceCycles>;
-    for (const ResourceUse &Use : IIE.UsedResources) {
-      const ResourceRef &RR = Use.first;
-      unsigned Index = ProcResID2ResourceUsersIndex[RR.first];
-      Index += countTrailingZeros(RR.second);
-      ResourceUsers[Index] = IID;
-    }
-  }
+  using ResourceRef = HWInstructionIssuedEvent::ResourceRef;
+  using ResourceUse = std::pair<ResourceRef, ResourceCycles>;
+  for (const ResourceUse &Use : Event.UsedResources) {
+    const ResourceRef &RR = Use.first;
+    unsigned Index = ProcResID2ResourceUsersIndex[RR.first];
+    Index += countTrailingZeros(RR.second);
+    ResourceUsers[Index] = std::make_pair(IID, Use.second.getNumerator());
   }
 }
 
@@ -125,7 +121,8 @@ void PressureTracker::handlePressureEvent(const HWPressureEvent &Event) {
       if (!BusyResources)
         continue;
 
-      IPI[IR.getSourceIndex()].ResourcePressureCycles++;
+      unsigned IID = IR.getSourceIndex();
+      IPI[IID].ResourcePressureCycles++;
     }
     break;
   }
@@ -146,93 +143,169 @@ void PressureTracker::handlePressureEvent(const HWPressureEvent &Event) {
 }
 
 #ifndef NDEBUG
-void DependencyGraph::dumpRegDeps(raw_ostream &OS, MCInstPrinter &MCIP) const {
+void DependencyGraph::dumpDependencyEdge(raw_ostream &OS,
+                                         const DependencyEdge &DepEdge,
+                                         MCInstPrinter &MCIP) const {
+  unsigned FromIID = DepEdge.FromIID;
+  unsigned ToIID = DepEdge.ToIID;
+  assert(FromIID < ToIID && "Graph should be acyclic!");
+
+  const DependencyEdge::Dependency &DE = DepEdge.Dep;
+  assert(DE.Type != DependencyEdge::DT_INVALID && "Unexpected invalid edge!");
+
+  OS << " FROM: " << FromIID << " TO: " << ToIID << "             ";
+  if (DE.Type == DependencyEdge::DT_REGISTER) {
+    OS << " - REGISTER: ";
+    MCIP.printRegName(OS, DE.ResourceOrRegID);
+  } else if (DE.Type == DependencyEdge::DT_MEMORY) {
+    OS << " - MEMORY";
+  } else {
+    assert(DE.Type == DependencyEdge::DT_RESOURCE &&
+           "Unexpected unsupported dependency type!");
+    OS << " - RESOURCE MASK: " << DE.ResourceOrRegID;
+  }
+  OS << " - CYCLES: " << DE.Cost << '\n';
+}
+
+void DependencyGraph::dump(raw_ostream &OS, MCInstPrinter &MCIP) const {
   OS << "\nREG DEPS\n";
-  for (unsigned I = 0, E = Nodes.size(); I < E; ++I) {
-    const DGNode &Node = Nodes[I];
-    for (const DependencyEdge &DE : Node.RegDeps) {
-      bool LoopCarried = I >= DE.IID;
-      OS << " FROM: " << I << " TO: " << DE.IID
-         << (LoopCarried ? " (loop carried)" : "             ")
-         << " - REGISTER: ";
-      MCIP.printRegName(OS, DE.ResourceOrRegID);
-      OS << " - CYCLES: " << DE.Cycles << '\n';
-    }
-  }
-}
+  for (const DGNode &Node : Nodes)
+    for (const DependencyEdge &DE : Node.OutgoingEdges)
+      if (DE.Dep.Type == DependencyEdge::DT_REGISTER)
+        dumpDependencyEdge(OS, DE, MCIP);
 
-void DependencyGraph::dumpMemDeps(raw_ostream &OS) const {
   OS << "\nMEM DEPS\n";
-  for (unsigned I = 0, E = Nodes.size(); I < E; ++I) {
-    const DGNode &Node = Nodes[I];
-    for (const DependencyEdge &DE : Node.MemDeps) {
-      bool LoopCarried = I >= DE.IID;
-      OS << " FROM: " << I << " TO: " << DE.IID
-         << (LoopCarried ? " (loop carried)" : "             ")
-         << " - MEMORY - CYCLES: " << DE.Cycles << '\n';
-    }
-  }
-}
+  for (const DGNode &Node : Nodes)
+    for (const DependencyEdge &DE : Node.OutgoingEdges)
+      if (DE.Dep.Type == DependencyEdge::DT_MEMORY)
+        dumpDependencyEdge(OS, DE, MCIP);
 
-void DependencyGraph::dumpResDeps(raw_ostream &OS) const {
   OS << "\nRESOURCE DEPS\n";
-  for (unsigned I = 0, E = Nodes.size(); I < E; ++I) {
-    const DGNode &Node = Nodes[I];
-    for (const DependencyEdge &DE : Node.ResDeps) {
-      bool LoopCarried = I >= DE.IID;
-      OS << " FROM: " << I << " TO: " << DE.IID
-         << (LoopCarried ? "(loop carried)" : "             ")
-         << " - RESOURCE MASK: " << DE.ResourceOrRegID;
-      OS << " - CYCLES: " << DE.Cycles << '\n';
-    }
-  }
+  for (const DGNode &Node : Nodes)
+    for (const DependencyEdge &DE : Node.OutgoingEdges)
+      if (DE.Dep.Type == DependencyEdge::DT_RESOURCE)
+        dumpDependencyEdge(OS, DE, MCIP);
 }
 #endif // NDEBUG
 
-void DependencyGraph::addDepImpl(SmallVectorImpl<DependencyEdge> &Vec,
-                                 DependencyEdge &&Dep) {
-  auto It = find_if(Vec, [Dep](DependencyEdge &DE) {
-    return DE.IID == Dep.IID && DE.ResourceOrRegID == Dep.ResourceOrRegID;
+void DependencyGraph::addDependency(unsigned From, unsigned To,
+                                    DependencyEdge::Dependency &&Dep) {
+  DGNode &NodeFrom = Nodes[From];
+  DGNode &NodeTo = Nodes[To];
+  SmallVectorImpl<DependencyEdge> &Vec = NodeFrom.OutgoingEdges;
+
+  auto It = find_if(Vec, [To, Dep](DependencyEdge &DE) {
+    return DE.ToIID == To && DE.Dep.ResourceOrRegID == Dep.ResourceOrRegID;
   });
 
   if (It != Vec.end()) {
-    It->Cycles += Dep.Cycles;
+    It->Dep.Cost += Dep.Cost;
     return;
   }
 
-  Vec.emplace_back(Dep);
-  Nodes[Dep.IID].NumPredecessors++;
+  DependencyEdge DE = {Dep, From, To};
+  Vec.emplace_back(DE);
+  NodeTo.NumPredecessors++;
 }
 
 BottleneckAnalysis::BottleneckAnalysis(const MCSubtargetInfo &sti,
-                                       ArrayRef<MCInst> Sequence)
-    : STI(sti), Tracker(STI.getSchedModel()), DG(Sequence.size()),
-      Source(Sequence), TotalCycles(0),
+                                       MCInstPrinter &Printer,
+                                       ArrayRef<MCInst> S, unsigned NumIter)
+    : STI(sti), Tracker(STI.getSchedModel()), DG(S.size() * 3),
+      Source(S), Iterations(NumIter), TotalCycles(0),
       PressureIncreasedBecauseOfResources(false),
       PressureIncreasedBecauseOfRegisterDependencies(false),
       PressureIncreasedBecauseOfMemoryDependencies(false),
       SeenStallCycles(false), BPI() {}
 
+void BottleneckAnalysis::addRegisterDep(unsigned From, unsigned To,
+                                        unsigned RegID, unsigned Cost) {
+  bool IsLoopCarried = From >= To;
+  unsigned SourceSize = Source.size();
+  if (IsLoopCarried) {
+    Cost *= Iterations / 2;
+    DG.addRegisterDep(From, To + SourceSize, RegID, Cost);
+    DG.addRegisterDep(From + SourceSize, To + (SourceSize * 2), RegID, Cost);
+    return;
+  }
+  DG.addRegisterDep(From + SourceSize, To + SourceSize, RegID, Cost);
+}
+
+void BottleneckAnalysis::addMemoryDep(unsigned From, unsigned To,
+                                      unsigned Cost) {
+  bool IsLoopCarried = From >= To;
+  unsigned SourceSize = Source.size();
+  if (IsLoopCarried) {
+    Cost *= Iterations / 2;
+    DG.addMemoryDep(From, To + SourceSize, Cost);
+    DG.addMemoryDep(From + SourceSize, To + (SourceSize * 2), Cost);
+    return;
+  }
+  DG.addMemoryDep(From + SourceSize, To + SourceSize, Cost);
+}
+
+void BottleneckAnalysis::addResourceDep(unsigned From, unsigned To,
+                                        uint64_t Mask, unsigned Cost) {
+  bool IsLoopCarried = From >= To;
+  unsigned SourceSize = Source.size();
+  if (IsLoopCarried) {
+    Cost *= Iterations / 2;
+    DG.addResourceDep(From, To + SourceSize, Mask, Cost);
+    DG.addResourceDep(From + SourceSize, To + (SourceSize * 2), Mask, Cost);
+    return;
+  }
+  DG.addResourceDep(From + SourceSize, To + SourceSize, Mask, Cost);
+}
+
 void BottleneckAnalysis::onEvent(const HWInstructionEvent &Event) {
-  Tracker.handleInstructionEvent(Event);
+  const unsigned IID = Event.IR.getSourceIndex();
+  if (Event.Type == HWInstructionEvent::Dispatched) {
+    Tracker.onInstructionDispatched(IID);
+    return;
+  }
+  if (Event.Type == HWInstructionEvent::Executed) {
+    Tracker.onInstructionExecuted(IID);
+    return;
+  }
+
   if (Event.Type != HWInstructionEvent::Issued)
     return;
 
-  const unsigned IID = Event.IR.getSourceIndex();
   const Instruction &IS = *Event.IR.getInstruction();
-  unsigned Cycles = Tracker.getRegisterPressureCycles(IID);
   unsigned To = IID % Source.size();
+
+  unsigned Cycles = Tracker.getResourcePressureCycles(IID);
+  if (Cycles) {
+    uint64_t ResourceMask = IS.getCriticalResourceMask();
+    SmallVector<std::pair<unsigned, unsigned>, 4> Users;
+    while (ResourceMask) {
+      uint64_t Current = ResourceMask & (-ResourceMask);
+      Tracker.getResourceUsers(Current, Users);
+      for (const std::pair<unsigned, unsigned> &U : Users) {
+        unsigned Cost = std::min(U.second, Cycles);
+        addResourceDep(U.first % Source.size(), To, Current, Cost);
+      }
+      Users.clear();
+      ResourceMask ^= Current;
+    }
+  }
+
+  Cycles = Tracker.getRegisterPressureCycles(IID);
   if (Cycles) {
     const CriticalDependency &RegDep = IS.getCriticalRegDep();
     unsigned From = RegDep.IID % Source.size();
-    DG.addRegDep(From, To, RegDep.RegID, Cycles);
+    addRegisterDep(From, To, RegDep.RegID, Cycles);
   }
+
   Cycles = Tracker.getMemoryPressureCycles(IID);
   if (Cycles) {
     const CriticalDependency &MemDep = IS.getCriticalMemDep();
     unsigned From = MemDep.IID % Source.size();
-    DG.addMemDep(From, To, Cycles);
+    addMemoryDep(From, To, Cycles);
   }
+
+  Tracker.handleInstructionIssuedEvent(
+      static_cast<const HWInstructionIssuedEvent &>(Event));
 }
 
 void BottleneckAnalysis::onEvent(const HWPressureEvent &Event) {
@@ -245,28 +318,9 @@ void BottleneckAnalysis::onEvent(const HWPressureEvent &Event) {
   default:
     break;
 
-  case HWPressureEvent::RESOURCES: {
+  case HWPressureEvent::RESOURCES:
     PressureIncreasedBecauseOfResources = true;
-
-    SmallVector<unsigned, 4> UniqueUsers;
-    for (const InstRef &IR : Event.AffectedInstructions) {
-      const Instruction &IS = *IR.getInstruction();
-      unsigned To = IR.getSourceIndex() % Source.size();
-      unsigned BusyResources =
-          IS.getCriticalResourceMask() & Event.ResourceMask;
-      while (BusyResources) {
-        uint64_t Current = BusyResources & (-BusyResources);
-        Tracker.getUniqueUsers(Current, UniqueUsers);
-        for (unsigned User : UniqueUsers)
-          DG.addResourceDep(User % Source.size(), To, Current, 1);
-        BusyResources ^= Current;
-      }
-      UniqueUsers.clear();
-    }
-
     break;
-  }
-
   case HWPressureEvent::REGISTER_DEPS:
     PressureIncreasedBecauseOfRegisterDependencies = true;
     break;

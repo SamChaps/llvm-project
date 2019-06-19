@@ -106,9 +106,7 @@ static void reportTranslationError(MachineFunction &MF,
     ORE.emit(R);
 }
 
-IRTranslator::IRTranslator() : MachineFunctionPass(ID) {
-  initializeIRTranslatorPass(*PassRegistry::getPassRegistry());
-}
+IRTranslator::IRTranslator() : MachineFunctionPass(ID) { }
 
 #ifndef NDEBUG
 namespace {
@@ -136,7 +134,11 @@ public:
     LLVM_DEBUG(dbgs() << "Checking DILocation from " << *CurrInst
                       << " was copied to " << MI);
 #endif
-    assert(CurrInst->getDebugLoc() == MI.getDebugLoc() &&
+    // We allow insts in the entry block to have a debug loc line of 0 because
+    // they could have originated from constants, and we don't want a jumpy
+    // debug experience.
+    assert((CurrInst->getDebugLoc() == MI.getDebugLoc() ||
+            MI.getDebugLoc().getLine() == 0) &&
            "Line info was not transferred to all instructions");
   }
 };
@@ -281,8 +283,6 @@ void IRTranslator::addMachineCFGPred(CFGEdge Edge, MachineBasicBlock *NewPred) {
 
 bool IRTranslator::translateBinaryOp(unsigned Opcode, const User &U,
                                      MachineIRBuilder &MIRBuilder) {
-  // FIXME: handle signed/unsigned wrapping flags.
-
   // Get or create a virtual register for each value.
   // Unless the value is a Constant => loadimm cst?
   // or inline constant each time?
@@ -304,18 +304,29 @@ bool IRTranslator::translateFSub(const User &U, MachineIRBuilder &MIRBuilder) {
   // -0.0 - X --> G_FNEG
   if (isa<Constant>(U.getOperand(0)) &&
       U.getOperand(0) == ConstantFP::getZeroValueForNegation(U.getType())) {
-    MIRBuilder.buildInstr(TargetOpcode::G_FNEG)
-        .addDef(getOrCreateVReg(U))
-        .addUse(getOrCreateVReg(*U.getOperand(1)));
+    unsigned Op1 = getOrCreateVReg(*U.getOperand(1));
+    unsigned Res = getOrCreateVReg(U);
+    uint16_t Flags = 0;
+    if (isa<Instruction>(U)) {
+      const Instruction &I = cast<Instruction>(U);
+      Flags = MachineInstr::copyFlagsFromInstruction(I);
+    }
+    // Negate the last operand of the FSUB
+    MIRBuilder.buildInstr(TargetOpcode::G_FNEG, {Res}, {Op1}, Flags);
     return true;
   }
   return translateBinaryOp(TargetOpcode::G_FSUB, U, MIRBuilder);
 }
 
 bool IRTranslator::translateFNeg(const User &U, MachineIRBuilder &MIRBuilder) {
-  MIRBuilder.buildInstr(TargetOpcode::G_FNEG)
-      .addDef(getOrCreateVReg(U))
-      .addUse(getOrCreateVReg(*U.getOperand(0)));
+  unsigned Op0 = getOrCreateVReg(*U.getOperand(0));
+  unsigned Res = getOrCreateVReg(U);
+  uint16_t Flags = 0;
+  if (isa<Instruction>(U)) {
+    const Instruction &I = cast<Instruction>(U);
+    Flags = MachineInstr::copyFlagsFromInstruction(I);
+  }
+  MIRBuilder.buildInstr(TargetOpcode::G_FNEG, {Res}, {Op0}, Flags);
   return true;
 }
 
@@ -728,6 +739,19 @@ bool IRTranslator::translateGetElementPtr(const User &U,
 bool IRTranslator::translateMemfunc(const CallInst &CI,
                                     MachineIRBuilder &MIRBuilder,
                                     unsigned ID) {
+
+  // If the source is undef, then just emit a nop.
+  if (isa<UndefValue>(CI.getArgOperand(1))) {
+    switch (ID) {
+    case Intrinsic::memmove:
+    case Intrinsic::memcpy:
+    case Intrinsic::memset:
+      return true;
+    default:
+      break;
+    }
+  }
+
   LLT SizeTy = getLLTForType(*CI.getArgOperand(2)->getType(), *DL);
   Type *DstTy = CI.getArgOperand(0)->getType();
   if (cast<PointerType>(DstTy)->getAddressSpace() != 0 ||
@@ -1108,6 +1132,11 @@ bool IRTranslator::translateKnownIntrinsic(const CallInst &CI, Intrinsic::ID ID,
   }
   case Intrinsic::invariant_end:
     return true;
+  case Intrinsic::assume:
+  case Intrinsic::var_annotation:
+  case Intrinsic::sideeffect:
+    // Discard annotate attributes, assumptions, and artificial side-effects.
+    return true;
   }
   return false;
 }
@@ -1220,8 +1249,10 @@ bool IRTranslator::translateCall(const User &U, MachineIRBuilder &MIRBuilder) {
   if (!CI.getType()->isVoidTy())
     ResultRegs = getOrCreateVRegs(CI);
 
+  // Ignore the callsite attributes. Backend code is most likely not expecting
+  // an intrinsic to sometimes have side effects and sometimes not.
   MachineInstrBuilder MIB =
-      MIRBuilder.buildIntrinsic(ID, ResultRegs, !CI.doesNotAccessMemory());
+      MIRBuilder.buildIntrinsic(ID, ResultRegs, !F->doesNotAccessMemory());
   if (isa<FPMathOperator>(CI))
     MIB->copyIRFlags(CI);
 
@@ -1695,8 +1726,15 @@ bool IRTranslator::valueIsSplit(const Value &V,
 
 bool IRTranslator::translate(const Instruction &Inst) {
   CurBuilder->setDebugLoc(Inst.getDebugLoc());
-  EntryBuilder->setDebugLoc(Inst.getDebugLoc());
-  switch(Inst.getOpcode()) {
+  // We only emit constants into the entry block from here. To prevent jumpy
+  // debug behaviour set the line to 0.
+  if (const DebugLoc &DL = Inst.getDebugLoc())
+    EntryBuilder->setDebugLoc(
+        DebugLoc::get(0, 0, DL.getScope(), DL.getInlinedAt()));
+  else
+    EntryBuilder->setDebugLoc(DebugLoc());
+
+  switch (Inst.getOpcode()) {
 #define HANDLE_INST(NUM, OPCODE, CLASS)                                        \
   case Instruction::OPCODE:                                                    \
     return translate##OPCODE(Inst, *CurBuilder.get());

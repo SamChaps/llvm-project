@@ -599,7 +599,8 @@ public:
   /// which we can fold and convert to a boolean condition using
   /// any crazy technique that we want to, even if the expression has
   /// side-effects.
-  bool EvaluateAsBooleanCondition(bool &Result, const ASTContext &Ctx) const;
+  bool EvaluateAsBooleanCondition(bool &Result, const ASTContext &Ctx,
+                                  bool InConstantContext = false) const;
 
   enum SideEffectsKind {
     SE_NoSideEffects,          ///< Strictly evaluate the expression.
@@ -611,20 +612,21 @@ public:
   /// EvaluateAsInt - Return true if this is a constant which we can fold and
   /// convert to an integer, using any crazy technique that we want to.
   bool EvaluateAsInt(EvalResult &Result, const ASTContext &Ctx,
-                     SideEffectsKind AllowSideEffects = SE_NoSideEffects) const;
+                     SideEffectsKind AllowSideEffects = SE_NoSideEffects,
+                     bool InConstantContext = false) const;
 
   /// EvaluateAsFloat - Return true if this is a constant which we can fold and
   /// convert to a floating point value, using any crazy technique that we
   /// want to.
-  bool
-  EvaluateAsFloat(llvm::APFloat &Result, const ASTContext &Ctx,
-                  SideEffectsKind AllowSideEffects = SE_NoSideEffects) const;
+  bool EvaluateAsFloat(llvm::APFloat &Result, const ASTContext &Ctx,
+                       SideEffectsKind AllowSideEffects = SE_NoSideEffects,
+                       bool InConstantContext = false) const;
 
   /// EvaluateAsFloat - Return true if this is a constant which we can fold and
   /// convert to a fixed point value.
-  bool EvaluateAsFixedPoint(
-      EvalResult &Result, const ASTContext &Ctx,
-      SideEffectsKind AllowSideEffects = SE_NoSideEffects) const;
+  bool EvaluateAsFixedPoint(EvalResult &Result, const ASTContext &Ctx,
+                            SideEffectsKind AllowSideEffects = SE_NoSideEffects,
+                            bool InConstantContext = false) const;
 
   /// isEvaluatable - Call EvaluateAsRValue to see if this expression can be
   /// constant folded without side-effects, but discard the result.
@@ -660,7 +662,8 @@ public:
 
   /// EvaluateAsLValue - Evaluate an expression to see if we can fold it to an
   /// lvalue with link time known address, with no side-effects.
-  bool EvaluateAsLValue(EvalResult &Result, const ASTContext &Ctx) const;
+  bool EvaluateAsLValue(EvalResult &Result, const ASTContext &Ctx,
+                        bool InConstantContext = false) const;
 
   /// EvaluateAsInitializer - Evaluate an expression as if it were the
   /// initializer of the given declaration. Returns true if the initializer
@@ -940,21 +943,61 @@ public:
   }
 };
 
-/// ConstantExpr - An expression that occurs in a constant context.
-class ConstantExpr : public FullExpr {
-  ConstantExpr(Expr *subexpr)
-    : FullExpr(ConstantExprClass, subexpr) {}
+/// ConstantExpr - An expression that occurs in a constant context and
+/// optionally the result of evaluating the expression.
+class ConstantExpr final
+    : public FullExpr,
+      private llvm::TrailingObjects<ConstantExpr, APValue, uint64_t> {
+  static_assert(std::is_same<uint64_t, llvm::APInt::WordType>::value,
+                "this class assumes llvm::APInt::WordType is uint64_t for "
+                "trail-allocated storage");
 
 public:
-  static ConstantExpr *Create(const ASTContext &Context, Expr *E) {
-    assert(!isa<ConstantExpr>(E));
-    return new (Context) ConstantExpr(E);
+  /// Describes the kind of result that can be trail-allocated.
+  enum ResultStorageKind { RSK_None, RSK_Int64, RSK_APValue };
+
+private:
+  size_t numTrailingObjects(OverloadToken<APValue>) const {
+    return ConstantExprBits.ResultKind == ConstantExpr::RSK_APValue;
+  }
+  size_t numTrailingObjects(OverloadToken<uint64_t>) const {
+    return ConstantExprBits.ResultKind == ConstantExpr::RSK_Int64;
   }
 
-  /// Build an empty constant expression wrapper.
-  explicit ConstantExpr(EmptyShell Empty)
-    : FullExpr(ConstantExprClass, Empty) {}
+  void DefaultInit(ResultStorageKind StorageKind);
+  uint64_t &Int64Result() {
+    assert(ConstantExprBits.ResultKind == ConstantExpr::RSK_Int64 &&
+           "invalid accessor");
+    return *getTrailingObjects<uint64_t>();
+  }
+  const uint64_t &Int64Result() const {
+    return const_cast<ConstantExpr *>(this)->Int64Result();
+  }
+  APValue &APValueResult() {
+    assert(ConstantExprBits.ResultKind == ConstantExpr::RSK_APValue &&
+           "invalid accessor");
+    return *getTrailingObjects<APValue>();
+  }
+  const APValue &APValueResult() const {
+    return const_cast<ConstantExpr *>(this)->APValueResult();
+  }
 
+  ConstantExpr(Expr *subexpr, ResultStorageKind StorageKind);
+  ConstantExpr(ResultStorageKind StorageKind, EmptyShell Empty);
+
+public:
+  friend TrailingObjects;
+  friend class ASTStmtReader;
+  friend class ASTStmtWriter;
+  static ConstantExpr *Create(const ASTContext &Context, Expr *E,
+                              const APValue &Result);
+  static ConstantExpr *Create(const ASTContext &Context, Expr *E,
+                              ResultStorageKind Storage = RSK_None);
+  static ConstantExpr *CreateEmpty(const ASTContext &Context,
+                                   ResultStorageKind StorageKind,
+                                   EmptyShell Empty);
+
+  static ResultStorageKind getStorageKind(const APValue &Value);
   SourceLocation getBeginLoc() const LLVM_READONLY {
     return SubExpr->getBeginLoc();
   }
@@ -965,6 +1008,25 @@ public:
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == ConstantExprClass;
   }
+
+  void SetResult(APValue Value) { MoveIntoResult(Value); }
+  void MoveIntoResult(APValue &Value);
+
+  APValue::ValueKind getResultAPValueKind() const {
+    switch (ConstantExprBits.ResultKind) {
+    case ConstantExpr::RSK_APValue:
+      return APValueResult().getKind();
+    case ConstantExpr::RSK_Int64:
+      return APValue::Int;
+    case ConstantExpr::RSK_None:
+      return APValue::None;
+    }
+    llvm_unreachable("invalid ResultKind");
+  }
+  ResultStorageKind getResultStorageKind() const {
+    return static_cast<ResultStorageKind>(ConstantExprBits.ResultKind);
+  }
+  APValue getAPValueResult() const;
 
   // Iterators
   child_range children() { return child_range(&SubExpr, &SubExpr+1); }
@@ -1115,7 +1177,7 @@ class DeclRefExpr final
               bool RefersToEnlosingVariableOrCapture,
               const DeclarationNameInfo &NameInfo, NamedDecl *FoundD,
               const TemplateArgumentListInfo *TemplateArgs, QualType T,
-              ExprValueKind VK);
+              ExprValueKind VK, NonOdrUseReason NOUR);
 
   /// Construct an empty declaration reference expression.
   explicit DeclRefExpr(EmptyShell Empty) : Expr(DeclRefExprClass, Empty) {}
@@ -1128,14 +1190,16 @@ public:
   DeclRefExpr(const ASTContext &Ctx, ValueDecl *D,
               bool RefersToEnclosingVariableOrCapture, QualType T,
               ExprValueKind VK, SourceLocation L,
-              const DeclarationNameLoc &LocInfo = DeclarationNameLoc());
+              const DeclarationNameLoc &LocInfo = DeclarationNameLoc(),
+              NonOdrUseReason NOUR = NOUR_None);
 
   static DeclRefExpr *
   Create(const ASTContext &Context, NestedNameSpecifierLoc QualifierLoc,
          SourceLocation TemplateKWLoc, ValueDecl *D,
          bool RefersToEnclosingVariableOrCapture, SourceLocation NameLoc,
          QualType T, ExprValueKind VK, NamedDecl *FoundD = nullptr,
-         const TemplateArgumentListInfo *TemplateArgs = nullptr);
+         const TemplateArgumentListInfo *TemplateArgs = nullptr,
+         NonOdrUseReason NOUR = NOUR_None);
 
   static DeclRefExpr *
   Create(const ASTContext &Context, NestedNameSpecifierLoc QualifierLoc,
@@ -1143,7 +1207,8 @@ public:
          bool RefersToEnclosingVariableOrCapture,
          const DeclarationNameInfo &NameInfo, QualType T, ExprValueKind VK,
          NamedDecl *FoundD = nullptr,
-         const TemplateArgumentListInfo *TemplateArgs = nullptr);
+         const TemplateArgumentListInfo *TemplateArgs = nullptr,
+         NonOdrUseReason NOUR = NOUR_None);
 
   /// Construct an empty declaration reference expression.
   static DeclRefExpr *CreateEmpty(const ASTContext &Context, bool HasQualifier,
@@ -1272,6 +1337,11 @@ public:
   /// greater than 1.
   void setHadMultipleCandidates(bool V = true) {
     DeclRefExprBits.HadMultipleCandidates = V;
+  }
+
+  /// Is this expression a non-odr-use reference, and if so, why?
+  NonOdrUseReason isNonOdrUse() const {
+    return static_cast<NonOdrUseReason>(DeclRefExprBits.NonOdrUseReason);
   }
 
   /// Does this DeclRefExpr refer to an enclosing local or a captured
@@ -1506,21 +1576,28 @@ public:
 
   /// Get a raw enumeration value representing the floating-point semantics of
   /// this literal (32-bit IEEE, x87, ...), suitable for serialisation.
-  APFloatSemantics getRawSemantics() const {
-    return static_cast<APFloatSemantics>(FloatingLiteralBits.Semantics);
+  llvm::APFloatBase::Semantics getRawSemantics() const {
+    return static_cast<llvm::APFloatBase::Semantics>(
+        FloatingLiteralBits.Semantics);
   }
 
   /// Set the raw enumeration value representing the floating-point semantics of
   /// this literal (32-bit IEEE, x87, ...), suitable for serialisation.
-  void setRawSemantics(APFloatSemantics Sem) {
+  void setRawSemantics(llvm::APFloatBase::Semantics Sem) {
     FloatingLiteralBits.Semantics = Sem;
   }
 
   /// Return the APFloat semantics this literal uses.
-  const llvm::fltSemantics &getSemantics() const;
+  const llvm::fltSemantics &getSemantics() const {
+    return llvm::APFloatBase::EnumToSemantics(
+        static_cast<llvm::APFloatBase::Semantics>(
+            FloatingLiteralBits.Semantics));
+  }
 
   /// Set the APFloat semantics this literal uses.
-  void setSemantics(const llvm::fltSemantics &Sem);
+  void setSemantics(const llvm::fltSemantics &Sem) {
+    FloatingLiteralBits.Semantics = llvm::APFloatBase::SemanticsToEnum(Sem);
+  }
 
   bool isExact() const { return FloatingLiteralBits.IsExact; }
   void setExact(bool E) { FloatingLiteralBits.IsExact = E; }
@@ -2772,7 +2849,8 @@ class MemberExpr final
 
   MemberExpr(Expr *Base, bool IsArrow, SourceLocation OperatorLoc,
              ValueDecl *MemberDecl, const DeclarationNameInfo &NameInfo,
-             QualType T, ExprValueKind VK, ExprObjectKind OK);
+             QualType T, ExprValueKind VK, ExprObjectKind OK,
+             NonOdrUseReason NOUR);
   MemberExpr(EmptyShell Empty)
       : Expr(MemberExprClass, Empty), Base(), MemberDecl() {}
 
@@ -2784,10 +2862,11 @@ public:
                             DeclAccessPair FoundDecl,
                             DeclarationNameInfo MemberNameInfo,
                             const TemplateArgumentListInfo *TemplateArgs,
-                            QualType T, ExprValueKind VK, ExprObjectKind OK);
+                            QualType T, ExprValueKind VK, ExprObjectKind OK,
+                            NonOdrUseReason NOUR);
 
   /// Create an implicit MemberExpr, with no location, qualifier, template
-  /// arguments, and so on.
+  /// arguments, and so on. Suitable only for non-static member access.
   static MemberExpr *CreateImplicit(const ASTContext &C, Expr *Base,
                                     bool IsArrow, ValueDecl *MemberDecl,
                                     QualType T, ExprValueKind VK,
@@ -2795,7 +2874,7 @@ public:
     return Create(C, Base, IsArrow, SourceLocation(), NestedNameSpecifierLoc(),
                   SourceLocation(), MemberDecl,
                   DeclAccessPair::make(MemberDecl, MemberDecl->getAccess()),
-                  DeclarationNameInfo(), nullptr, T, VK, OK);
+                  DeclarationNameInfo(), nullptr, T, VK, OK, NOUR_None);
   }
 
   static MemberExpr *CreateEmpty(const ASTContext &Context, bool HasQualifier,
@@ -2947,6 +3026,12 @@ public:
   /// calls to virtual method will still go through the vtable.
   bool performsVirtualDispatch(const LangOptions &LO) const {
     return LO.AppleKext || !hasQualifier();
+  }
+
+  /// Is this expression a non-odr-use reference, and if so, why?
+  /// This is only meaningful if the named member is a static member.
+  NonOdrUseReason isNonOdrUse() const {
+    return static_cast<NonOdrUseReason>(MemberExprBits.NonOdrUseReason);
   }
 
   static bool classof(const Stmt *T) {

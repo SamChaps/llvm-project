@@ -167,7 +167,6 @@ def S_ADD_U64_CO_PSEUDO : SPseudoInstSI <
 def S_SUB_U64_CO_PSEUDO : SPseudoInstSI <
   (outs SReg_64:$vdst, VOPDstS64:$sdst), (ins SSrc_b64:$src0, SSrc_b64:$src1)
 >;
-
 } // End usesCustomInserter = 1, Defs = [SCC]
 
 let usesCustomInserter = 1 in {
@@ -188,9 +187,18 @@ class WrapTerminatorInst<SOP_Pseudo base_inst> : SPseudoInstSI<
   let CodeSize = base_inst.CodeSize;
 }
 
+let WaveSizePredicate = isWave64 in {
 def S_MOV_B64_term : WrapTerminatorInst<S_MOV_B64>;
 def S_XOR_B64_term : WrapTerminatorInst<S_XOR_B64>;
 def S_ANDN2_B64_term : WrapTerminatorInst<S_ANDN2_B64>;
+}
+
+let WaveSizePredicate = isWave32 in {
+def S_MOV_B32_term : WrapTerminatorInst<S_MOV_B32>;
+def S_XOR_B32_term : WrapTerminatorInst<S_XOR_B32>;
+def S_OR_B32_term : WrapTerminatorInst<S_OR_B32>;
+def S_ANDN2_B32_term : WrapTerminatorInst<S_ANDN2_B32>;
+}
 
 def WAVE_BARRIER : SPseudoInstSI<(outs), (ins),
   [(int_amdgcn_wave_barrier)]> {
@@ -343,6 +351,15 @@ def SI_INIT_EXEC : SPseudoInstSI <
   let Defs = [EXEC];
   let usesCustomInserter = 1;
   let isAsCheapAsAMove = 1;
+  let WaveSizePredicate = isWave64;
+}
+
+def SI_INIT_EXEC_LO : SPseudoInstSI <
+  (outs), (ins i32imm:$src), []> {
+  let Defs = [EXEC_LO];
+  let usesCustomInserter = 1;
+  let isAsCheapAsAMove = 1;
+  let WaveSizePredicate = isWave32;
 }
 
 def SI_INIT_EXEC_FROM_INPUT : SPseudoInstSI <
@@ -533,14 +550,28 @@ def SI_PC_ADD_REL_OFFSET : SPseudoInstSI <
   (outs SReg_64:$dst),
   (ins si_ga:$ptr_lo, si_ga:$ptr_hi),
   [(set SReg_64:$dst,
-   (i64 (SIpc_add_rel_offset (tglobaladdr:$ptr_lo), (tglobaladdr:$ptr_hi))))]> {
+      (i64 (SIpc_add_rel_offset tglobaladdr:$ptr_lo, tglobaladdr:$ptr_hi)))]> {
   let Defs = [SCC];
 }
 
 def : GCNPat <
+  (SIpc_add_rel_offset tglobaladdr:$ptr_lo, 0),
+  (SI_PC_ADD_REL_OFFSET $ptr_lo, (i32 0))
+>;
+
+def : GCNPat <
   (AMDGPUinit_exec i64:$src),
   (SI_INIT_EXEC (as_i64imm $src))
->;
+> {
+  let WaveSizePredicate = isWave64;
+}
+
+def : GCNPat <
+  (AMDGPUinit_exec i64:$src),
+  (SI_INIT_EXEC_LO (as_i32imm $src))
+> {
+  let WaveSizePredicate = isWave32;
+}
 
 def : GCNPat <
   (AMDGPUinit_exec_from_input i32:$input, i32:$shift),
@@ -586,7 +617,12 @@ def : Pat <
   // TODO: we could add more variants for other types of conditionals
 
 def : Pat <
-  (int_amdgcn_icmp i1:$src, (i1 0), (i32 33)),
+  (i64 (int_amdgcn_icmp i1:$src, (i1 0), (i32 33))),
+  (COPY $src) // Return the SGPRs representing i1 src
+>;
+
+def : Pat <
+  (i32 (int_amdgcn_icmp i1:$src, (i1 0), (i32 33))),
   (COPY $src) // Return the SGPRs representing i1 src
 >;
 
@@ -1142,7 +1178,16 @@ def : GCNPat <
 def : GCNPat <
   (i1 imm:$imm),
   (S_MOV_B64 (i64 (as_i64imm $imm)))
->;
+> {
+  let WaveSizePredicate = isWave64;
+}
+
+def : GCNPat <
+  (i1 imm:$imm),
+  (S_MOV_B32 (i32 (as_i32imm $imm)))
+> {
+  let WaveSizePredicate = isWave32;
+}
 
 def : GCNPat <
   (f64 InlineFPImm<f64>:$imm),
@@ -1333,10 +1378,12 @@ def : FPToI1Pat<V_CMP_EQ_F64_e64, CONST.FP64_NEG_ONE, i64, f64, fp_to_sint>;
 
 // If we need to perform a logical operation on i1 values, we need to
 // use vector comparisons since there is only one SCC register. Vector
-// comparisons still write to a pair of SGPRs, so treat these as
-// 64-bit comparisons. When legalizing SGPR copies, instructions
-// resulting in the copies from SCC to these instructions will be
-// moved to the VALU.
+// comparisons may write to a pair of SGPRs or a single SGPR, so treat
+// these as 32 or 64-bit comparisons. When legalizing SGPR copies,
+// instructions resulting in the copies from SCC to these instructions
+// will be moved to the VALU.
+
+let WaveSizePredicate = isWave64 in {
 def : GCNPat <
   (i1 (and i1:$src0, i1:$src1)),
   (S_AND_B64 $src0, $src1)
@@ -1373,6 +1420,46 @@ def : GCNPat <
   (S_NOT_B64 $src0)
 >;
 }
+} // end isWave64
+
+let WaveSizePredicate = isWave32 in {
+def : GCNPat <
+  (i1 (and i1:$src0, i1:$src1)),
+  (S_AND_B32 $src0, $src1)
+>;
+
+def : GCNPat <
+  (i1 (or i1:$src0, i1:$src1)),
+  (S_OR_B32 $src0, $src1)
+>;
+
+def : GCNPat <
+  (i1 (xor i1:$src0, i1:$src1)),
+  (S_XOR_B32 $src0, $src1)
+>;
+
+def : GCNPat <
+  (i1 (add i1:$src0, i1:$src1)),
+  (S_XOR_B32 $src0, $src1)
+>;
+
+def : GCNPat <
+  (i1 (sub i1:$src0, i1:$src1)),
+  (S_XOR_B32 $src0, $src1)
+>;
+
+let AddedComplexity = 1 in {
+def : GCNPat <
+  (i1 (add i1:$src0, (i1 -1))),
+  (S_NOT_B32 $src0)
+>;
+
+def : GCNPat <
+  (i1 (sub i1:$src0, (i1 -1))),
+  (S_NOT_B32 $src0)
+>;
+}
+} // end isWave32
 
 def : GCNPat <
   (f16 (sint_to_fp i1:$src)),
@@ -1668,6 +1755,13 @@ def : GCNPat<
   (S_SUB_I32 $src0, NegSubInlineConst32:$src1)
 >;
 
+// Avoid pointlessly materializing a constant in VGPR.
+// FIXME: Should also do this for readlane, but tablegen crashes on
+// the ignored src1.
+def : GCNPat<
+  (int_amdgcn_readfirstlane (i32 imm:$src)),
+  (S_MOV_B32 $src)
+>;
 
 multiclass BFMPatterns <ValueType vt, InstSI BFM, InstSI MOV> {
   def : GCNPat <
