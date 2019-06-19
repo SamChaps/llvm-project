@@ -1,0 +1,7 @@
+[
+{
+  "directory": "DIR",
+  "command": "clang -c DIR/regular_cdb.cpp -IInputs -MD -MF DIR/regular_cdb.d",
+  "file": "DIR/regular_cdb.cpp"
+}
+]
