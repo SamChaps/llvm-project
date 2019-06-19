@@ -4,6 +4,11 @@ set(LLVM_LINK_COMPONENTS
 )
 
 add_clang_library(clang-scan-deps SHARED
+  Core
+  Support
+  )
+
+add_clang_tool(clang-scan-deps
   ClangScanDeps.cpp
   )
 
@@ -16,6 +21,7 @@ set(CLANG_SCAN_DEPS_LIB_DEPS
   clangFrontendTool
   clangLex
   clangParse
+  clangSerialization
   clangTooling
   )
 

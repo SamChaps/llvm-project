@@ -533,6 +533,18 @@ void ASTStmtReader::VisitExpr(Expr *E) {
 
 void ASTStmtReader::VisitConstantExpr(ConstantExpr *E) {
   VisitExpr(E);
+  E->ConstantExprBits.ResultKind = Record.readInt();
+  switch (E->ConstantExprBits.ResultKind) {
+  case ConstantExpr::RSK_Int64: {
+    E->Int64Result() = Record.readInt();
+    uint64_t tmp = Record.readInt();
+    E->ConstantExprBits.IsUnsigned = tmp & 0x1;
+    E->ConstantExprBits.BitWidth = tmp >> 1;
+    break;
+  }
+  case ConstantExpr::RSK_APValue:
+    E->APValueResult() = Record.readAPValue();
+  }
   E->setSubExpr(Record.readSubExpr());
 }
 
@@ -554,6 +566,7 @@ void ASTStmtReader::VisitDeclRefExpr(DeclRefExpr *E) {
   E->DeclRefExprBits.HasTemplateKWAndArgsInfo = Record.readInt();
   E->DeclRefExprBits.HadMultipleCandidates = Record.readInt();
   E->DeclRefExprBits.RefersToEnclosingVariableOrCapture = Record.readInt();
+  E->DeclRefExprBits.NonOdrUseReason = Record.readInt();
   unsigned NumTemplateArgs = 0;
   if (E->hasTemplateKWAndArgsInfo())
     NumTemplateArgs = Record.readInt();
@@ -589,7 +602,8 @@ void ASTStmtReader::VisitFixedPointLiteral(FixedPointLiteral *E) {
 
 void ASTStmtReader::VisitFloatingLiteral(FloatingLiteral *E) {
   VisitExpr(E);
-  E->setRawSemantics(static_cast<Stmt::APFloatSemantics>(Record.readInt()));
+  E->setRawSemantics(
+      static_cast<llvm::APFloatBase::Semantics>(Record.readInt()));
   E->setExact(Record.readInt());
   E->setValue(Record.getContext(), Record.readAPFloat(E->getSemantics()));
   E->setLocation(ReadSourceLocation());
@@ -767,6 +781,7 @@ void ASTStmtReader::VisitMemberExpr(MemberExpr *E) {
   E->MemberExprBits.HasQualifierOrFoundDecl = HasQualifier || HasFoundDecl;
   E->MemberExprBits.HasTemplateKWAndArgsInfo = HasTemplateInfo;
   E->MemberExprBits.HadMultipleCandidates = Record.readInt();
+  E->MemberExprBits.NonOdrUseReason = Record.readInt();
   E->MemberExprBits.OperatorLoc = Record.readSourceLocation();
 
   if (HasQualifier || HasFoundDecl) {
@@ -2508,7 +2523,11 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
       break;
 
     case EXPR_CONSTANT:
-      S = new (Context) ConstantExpr(Empty);
+      S = ConstantExpr::CreateEmpty(
+          Context,
+          static_cast<ConstantExpr::ResultStorageKind>(
+              Record[ASTStmtReader::NumExprFields]),
+          Empty);
       break;
 
     case EXPR_PREDEFINED:
@@ -2524,7 +2543,7 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
         /*HasFoundDecl=*/Record[ASTStmtReader::NumExprFields + 1],
         /*HasTemplateKWAndArgsInfo=*/Record[ASTStmtReader::NumExprFields + 2],
         /*NumTemplateArgs=*/Record[ASTStmtReader::NumExprFields + 2] ?
-          Record[ASTStmtReader::NumExprFields + 5] : 0);
+          Record[ASTStmtReader::NumExprFields + 6] : 0);
       break;
 
     case EXPR_INTEGER_LITERAL:

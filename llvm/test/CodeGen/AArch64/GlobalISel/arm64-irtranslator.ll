@@ -33,13 +33,13 @@ define i64 @muli64(i64 %arg1, i64 %arg2) {
 ; CHECK-LABEL: name: allocai64
 ; CHECK: stack:
 ; CHECK-NEXT:   - { id: 0, name: ptr1, type: default, offset: 0, size: 8, alignment: 8,
-; CHECK-NEXT:       stack-id: 0, callee-saved-register: '', callee-saved-restored: true,
+; CHECK-NEXT:       stack-id: default, callee-saved-register: '', callee-saved-restored: true,
 ; CHECK-NEXT: debug-info-variable: '', debug-info-expression: '', debug-info-location: '' }
 ; CHECK-NEXT:   - { id: 1, name: ptr2, type: default, offset: 0, size: 8, alignment: 1,
-; CHECK-NEXT:       stack-id: 0, callee-saved-register: '', callee-saved-restored: true,
+; CHECK-NEXT:       stack-id: default, callee-saved-register: '', callee-saved-restored: true,
 ; CHECK-NEXT:       debug-info-variable: '', debug-info-expression: '', debug-info-location: '' }
 ; CHECK-NEXT:   - { id: 2, name: ptr3, type: default, offset: 0, size: 128, alignment: 8,
-; CHECK-NEXT:       stack-id: 0, callee-saved-register: '', callee-saved-restored: true,
+; CHECK-NEXT:       stack-id: default, callee-saved-register: '', callee-saved-restored: true,
 ; CHECK-NEXT:       debug-info-variable: '', debug-info-expression: '', debug-info-location: '' }
 ; CHECK-NEXT:   - { id: 3, name: ptr4, type: default, offset: 0, size: 1, alignment: 8,
 ; CHECK: %{{[0-9]+}}:_(p0) = G_FRAME_INDEX %stack.0.ptr1
@@ -834,6 +834,16 @@ define float @test_fneg(float %arg1) {
   ret float %res
 }
 
+; CHECK-LABEL: name: test_fneg_fmf
+; CHECK: [[ARG1:%[0-9]+]]:_(s32) = COPY $s0
+; CHECK-NEXT: [[RES:%[0-9]+]]:_(s32) = nnan ninf nsz arcp contract afn reassoc G_FNEG [[ARG1]]
+; CHECK-NEXT: $s0 = COPY [[RES]]
+; CHECK-NEXT: RET_ReallyLR implicit $s0
+define float @test_fneg_fmf(float %arg1) {
+  %res = fneg fast float %arg1
+  ret float %res
+}
+
 ; CHECK-LABEL: name: test_sadd_overflow
 ; CHECK: [[LHS:%[0-9]+]]:_(s32) = COPY $w0
 ; CHECK: [[RHS:%[0-9]+]]:_(s32) = COPY $w1
@@ -1536,12 +1546,30 @@ define float @test_fneg_f32(float %x) {
   ret float %neg
 }
 
+define float @test_fneg_f32_fmf(float %x) {
+; CHECK-LABEL: name: test_fneg_f32
+; CHECK: [[ARG:%[0-9]+]]:_(s32) = COPY $s0
+; CHECK: [[RES:%[0-9]+]]:_(s32) = nnan ninf nsz arcp contract afn reassoc G_FNEG [[ARG]]
+; CHECK: $s0 = COPY [[RES]](s32)
+  %neg = fsub fast float -0.000000e+00, %x
+  ret float %neg
+}
+
 define double @test_fneg_f64(double %x) {
 ; CHECK-LABEL: name: test_fneg_f64
 ; CHECK: [[ARG:%[0-9]+]]:_(s64) = COPY $d0
 ; CHECK: [[RES:%[0-9]+]]:_(s64) = G_FNEG [[ARG]]
 ; CHECK: $d0 = COPY [[RES]](s64)
   %neg = fsub double -0.000000e+00, %x
+  ret double %neg
+}
+
+define double @test_fneg_f64_fmf(double %x) {
+; CHECK-LABEL: name: test_fneg_f64
+; CHECK: [[ARG:%[0-9]+]]:_(s64) = COPY $d0
+; CHECK: [[RES:%[0-9]+]]:_(s64) = nnan ninf nsz arcp contract afn reassoc G_FNEG [[ARG]]
+; CHECK: $d0 = COPY [[RES]](s64)
+  %neg = fsub fast double -0.000000e+00, %x
   ret double %neg
 }
 
@@ -2389,4 +2417,31 @@ define float @test_rint_f32(float %x) {
   ; CHECK: %{{[0-9]+}}:_(s32) = G_FRINT %{{[0-9]+}}
   %y = call float @llvm.rint.f32(float %x)
   ret float %y
+}
+
+declare void @llvm.assume(i1)
+define void @test_assume(i1 %x) {
+  ; CHECK-LABEL: name:            test_assume
+  ; CHECK-NOT: llvm.assume
+  ; CHECK: RET_ReallyLR
+  call void @llvm.assume(i1 %x)
+  ret void
+}
+
+declare void @llvm.sideeffect()
+define void @test_sideeffect() {
+  ; CHECK-LABEL: name:            test_sideeffect
+  ; CHECK-NOT: llvm.sideeffect
+  ; CHECK: RET_ReallyLR
+  call void @llvm.sideeffect()
+  ret void
+}
+
+declare void @llvm.var.annotation(i8*, i8*, i8*, i32)
+define void @test_var_annotation(i8*, i8*, i8*, i32) {
+  ; CHECK-LABEL: name:            test_var_annotation
+  ; CHECK-NOT: llvm.var.annotation
+  ; CHECK: RET_ReallyLR
+  call void @llvm.var.annotation(i8* %0, i8* %1, i8* %2, i32 %3)
+  ret void
 }

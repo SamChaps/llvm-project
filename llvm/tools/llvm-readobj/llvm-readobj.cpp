@@ -378,6 +378,12 @@ void reportWarning(Twine Msg) {
   WithColor::warning(errs()) << Msg << "\n";
 }
 
+void warn(Error Err) {
+  handleAllErrors(std::move(Err), [&](const ErrorInfoBase &EI) {
+    reportWarning(EI.message());
+  });
+}
+
 void error(Error EC) {
   if (!EC)
     return;
@@ -489,13 +495,9 @@ static void dumpObject(const ObjectFile *Obj, ScopedPrinter &Writer) {
   if (opts::ProgramHeaders || opts::SectionMapping == cl::BOU_TRUE)
     Dumper->printProgramHeaders(opts::ProgramHeaders, opts::SectionMapping);
   if (!opts::StringDump.empty())
-    llvm::for_each(opts::StringDump, [&Dumper, Obj](StringRef SectionName) {
-      Dumper->printSectionAsString(Obj, SectionName);
-    });
+    Dumper->printSectionsAsString(Obj, opts::StringDump);
   if (!opts::HexDump.empty())
-    llvm::for_each(opts::HexDump, [&Dumper, Obj](StringRef SectionName) {
-      Dumper->printSectionAsHex(Obj, SectionName);
-    });
+    Dumper->printSectionsAsHex(Obj, opts::HexDump);
   if (opts::HashTable)
     Dumper->printHashTable();
   if (opts::GnuHashTable)
@@ -609,8 +611,8 @@ static void dumpMachOUniversalBinary(const MachOUniversalBinary *UBinary,
 }
 
 /// Dumps \a WinRes, Windows Resource (.res) file;
-static void dumpWindowsResourceFile(WindowsResource *WinRes) {
-  ScopedPrinter Printer{outs()};
+static void dumpWindowsResourceFile(WindowsResource *WinRes,
+                                    ScopedPrinter &Printer) {
   WindowsRes::Dumper Dumper(WinRes, Printer);
   if (auto Err = Dumper.printData())
     reportError(WinRes->getFileName(), std::move(Err));
@@ -618,9 +620,7 @@ static void dumpWindowsResourceFile(WindowsResource *WinRes) {
 
 
 /// Opens \a File and dumps it.
-static void dumpInput(StringRef File) {
-  ScopedPrinter Writer(outs());
-
+static void dumpInput(StringRef File, ScopedPrinter &Writer) {
   // Attempt to open the binary.
   Expected<OwningBinary<Binary>> BinaryOrErr = createBinary(File);
   if (!BinaryOrErr)
@@ -637,7 +637,7 @@ static void dumpInput(StringRef File) {
   else if (COFFImportFile *Import = dyn_cast<COFFImportFile>(&Binary))
     dumpCOFFImportFile(Import, Writer);
   else if (WindowsResource *WinRes = dyn_cast<WindowsResource>(&Binary))
-    dumpWindowsResourceFile(WinRes);
+    dumpWindowsResourceFile(WinRes, Writer);
   else
     reportError(File, readobj_error::unrecognized_file_format);
 
@@ -727,15 +727,16 @@ int main(int argc, const char *argv[]) {
   if (opts::InputFilenames.empty())
     opts::InputFilenames.push_back("-");
 
-  llvm::for_each(opts::InputFilenames, dumpInput);
+  ScopedPrinter Writer(fouts());
+  for (const std::string &I : opts::InputFilenames)
+    dumpInput(I, Writer);
 
   if (opts::CodeViewMergedTypes) {
-    ScopedPrinter W(outs());
     if (opts::CodeViewEnableGHash)
-      dumpCodeViewMergedTypes(W, CVTypes.GlobalIDTable.records(),
+      dumpCodeViewMergedTypes(Writer, CVTypes.GlobalIDTable.records(),
                               CVTypes.GlobalTypeTable.records());
     else
-      dumpCodeViewMergedTypes(W, CVTypes.IDTable.records(),
+      dumpCodeViewMergedTypes(Writer, CVTypes.IDTable.records(),
                               CVTypes.TypeTable.records());
   }
 

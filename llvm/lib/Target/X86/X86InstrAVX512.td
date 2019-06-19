@@ -3771,19 +3771,10 @@ def VMOV64toSDZrr : AVX512BI<0x6E, MRMSrcReg, (outs FR64X:$dst), (ins GR64:$src)
                        "vmovq\t{$src, $dst|$dst, $src}",
                        [(set FR64X:$dst, (bitconvert GR64:$src))]>,
                        EVEX, VEX_W, Sched<[WriteVecMoveFromGpr]>;
-def VMOV64toSDZrm : AVX512XSI<0x7E, MRMSrcMem, (outs FR64X:$dst), (ins i64mem:$src),
-                      "vmovq\t{$src, $dst|$dst, $src}",
-                      [(set FR64X:$dst, (bitconvert (loadi64 addr:$src)))]>,
-                      EVEX, VEX_W, EVEX_CD8<8, CD8VT8>, Sched<[WriteVecLoad]>;
 def VMOVSDto64Zrr : AVX512BI<0x7E, MRMDestReg, (outs GR64:$dst), (ins FR64X:$src),
                          "vmovq\t{$src, $dst|$dst, $src}",
                          [(set GR64:$dst, (bitconvert FR64X:$src))]>,
                          EVEX, VEX_W, Sched<[WriteVecMoveFromGpr]>;
-def VMOVSDto64Zmr : AVX512BI<0x7E, MRMDestMem, (outs), (ins i64mem:$dst, FR64X:$src),
-                         "vmovq\t{$src, $dst|$dst, $src}",
-                         [(store (i64 (bitconvert FR64X:$src)), addr:$dst)]>,
-                         EVEX, VEX_W, Sched<[WriteVecStore]>,
-                         EVEX_CD8<64, CD8VT1>;
 }
 } // ExeDomain = SSEPackedInt
 
@@ -3794,11 +3785,6 @@ def VMOVDI2SSZrr  : AVX512BI<0x6E, MRMSrcReg, (outs FR32X:$dst), (ins GR32:$src)
                       "vmovd\t{$src, $dst|$dst, $src}",
                       [(set FR32X:$dst, (bitconvert GR32:$src))]>,
                       EVEX, Sched<[WriteVecMoveFromGpr]>;
-
-def VMOVDI2SSZrm  : AVX512BI<0x6E, MRMSrcMem, (outs FR32X:$dst), (ins i32mem:$src),
-                      "vmovd\t{$src, $dst|$dst, $src}",
-                      [(set FR32X:$dst, (bitconvert (loadi32 addr:$src)))]>,
-                      EVEX, EVEX_CD8<32, CD8VT1>, Sched<[WriteVecLoad]>;
 } // ExeDomain = SSEPackedInt, isCodeGenOnly = 1
 
 // Move doubleword from xmm register to r/m32
@@ -3864,11 +3850,6 @@ def VMOVSS2DIZrr  : AVX512BI<0x7E, MRMDestReg, (outs GR32:$dst),
                       "vmovd\t{$src, $dst|$dst, $src}",
                       [(set GR32:$dst, (bitconvert FR32X:$src))]>,
                       EVEX, Sched<[WriteVecMoveToGpr]>;
-def VMOVSS2DIZmr  : AVX512BI<0x7E, MRMDestMem, (outs),
-                      (ins i32mem:$dst, FR32X:$src),
-                      "vmovd\t{$src, $dst|$dst, $src}",
-                      [(store (i32 (bitconvert FR32X:$src)), addr:$dst)]>,
-                      EVEX, EVEX_CD8<32, CD8VT1>, Sched<[WriteVecStore]>;
 } // ExeDomain = SSEPackedInt, isCodeGenOnly = 1
 
 // Move Quadword Int to Packed Quadword Int
@@ -3917,11 +3898,18 @@ multiclass avx512_move_scalar<string asm, SDNode OpNode,
                                      (_.VT (OpNode _.RC:$src1, _.RC:$src2)),
                                      (_.VT _.RC:$src0))))],
              _.ExeDomain>, EVEX_4V, EVEX_K, Sched<[SchedWriteFShuffle.XMM]>;
-  let canFoldAsLoad = 1, isReMaterializable = 1 in
-  def rm : AVX512PI<0x10, MRMSrcMem, (outs _.FRC:$dst), (ins _.ScalarMemOp:$src),
+  let canFoldAsLoad = 1, isReMaterializable = 1 in {
+  def rm : AVX512PI<0x10, MRMSrcMem, (outs _.RC:$dst), (ins _.ScalarMemOp:$src),
              !strconcat(asm, "\t{$src, $dst|$dst, $src}"),
-             [(set _.FRC:$dst, (_.ScalarLdFrag addr:$src))],
+             [(set _.RC:$dst, (_.VT (X86vzload addr:$src)))],
              _.ExeDomain>, EVEX, Sched<[WriteFLoad]>;
+  // _alt version uses FR32/FR64 register class.
+  let isCodeGenOnly = 1 in
+  def rm_alt : AVX512PI<0x10, MRMSrcMem, (outs _.FRC:$dst), (ins _.ScalarMemOp:$src),
+                 !strconcat(asm, "\t{$src, $dst|$dst, $src}"),
+                 [(set _.FRC:$dst, (_.ScalarLdFrag addr:$src))],
+                 _.ExeDomain>, EVEX, Sched<[WriteFLoad]>;
+  }
   let mayLoad = 1, hasSideEffects = 0 in {
     let Constraints = "$src0 = $dst" in
     def rmk : AVX512PI<0x10, MRMSrcMem, (outs _.RC:$dst),
@@ -3941,7 +3929,7 @@ multiclass avx512_move_scalar<string asm, SDNode OpNode,
              EVEX, Sched<[WriteFStore]>;
   let mayStore = 1, hasSideEffects = 0 in
   def mrk: AVX512PI<0x11, MRMDestMem, (outs),
-              (ins _.ScalarMemOp:$dst, VK1WM:$mask, _.FRC:$src),
+              (ins _.ScalarMemOp:$dst, VK1WM:$mask, _.RC:$src),
               !strconcat(asm, "\t{$src, $dst {${mask}}|$dst {${mask}}, $src}"),
               [], _.ExeDomain>, EVEX, EVEX_K, Sched<[WriteFStore]>,
               NotMemoryFoldable;
@@ -3988,7 +3976,7 @@ def : Pat<(masked_store
                                (iPTR 0))), addr:$dst, Mask),
           (!cast<Instruction>(InstrStr#mrk) addr:$dst,
                       (COPY_TO_REGCLASS MaskRC:$mask, VK1WM),
-                      (COPY_TO_REGCLASS _.info128.RC:$src, _.info128.FRC))>;
+                      _.info128.RC:$src)>;
 
 }
 
@@ -4003,7 +3991,7 @@ def : Pat<(masked_store
                                (iPTR 0))), addr:$dst, Mask),
           (!cast<Instruction>(InstrStr#mrk) addr:$dst,
                       (COPY_TO_REGCLASS (i32 (INSERT_SUBREG (IMPLICIT_DEF), MaskRC:$mask, subreg)), VK1WM),
-                      (COPY_TO_REGCLASS _.info128.RC:$src, _.info128.FRC))>;
+                      _.info128.RC:$src)>;
 
 }
 
@@ -4023,13 +4011,13 @@ def : Pat<(masked_store
                                (iPTR 0))), addr:$dst, Mask512),
           (!cast<Instruction>(InstrStr#mrk) addr:$dst,
                       (COPY_TO_REGCLASS (i32 (INSERT_SUBREG (IMPLICIT_DEF), MaskRC:$mask, subreg)), VK1WM),
-                      (COPY_TO_REGCLASS _.info128.RC:$src, _.info128.FRC))>;
+                      _.info128.RC:$src)>;
 
 // AVX512VL pattern.
 def : Pat<(masked_store (_.info128.VT _.info128.RC:$src), addr:$dst, Mask128),
           (!cast<Instruction>(InstrStr#mrk) addr:$dst,
                       (COPY_TO_REGCLASS (i32 (INSERT_SUBREG (IMPLICIT_DEF), MaskRC:$mask, subreg)), VK1WM),
-                      (COPY_TO_REGCLASS _.info128.RC:$src, _.info128.FRC))>;
+                      _.info128.RC:$src)>;
 }
 
 multiclass avx512_load_scalar_lowering<string InstrStr, AVX512VLVectorVTInfo _,
@@ -4359,20 +4347,16 @@ let Predicates = [HasAVX512] in {
   // MOVSSrm zeros the high parts of the register; represent this
   // with SUBREG_TO_REG. The AVX versions also write: DST[255:128] <- 0
   def : Pat<(v4f32 (X86vzmovl (v4f32 (scalar_to_vector (loadf32 addr:$src))))),
-            (COPY_TO_REGCLASS (VMOVSSZrm addr:$src), VR128X)>;
+            (VMOVSSZrm addr:$src)>;
   def : Pat<(v4f32 (X86vzmovl (loadv4f32 addr:$src))),
-            (COPY_TO_REGCLASS (VMOVSSZrm addr:$src), VR128X)>;
-  def : Pat<(v4f32 (X86vzload addr:$src)),
-            (COPY_TO_REGCLASS (VMOVSSZrm addr:$src), VR128X)>;
+            (VMOVSSZrm addr:$src)>;
 
   // MOVSDrm zeros the high parts of the register; represent this
   // with SUBREG_TO_REG. The AVX versions also write: DST[255:128] <- 0
   def : Pat<(v2f64 (X86vzmovl (v2f64 (scalar_to_vector (loadf64 addr:$src))))),
-            (COPY_TO_REGCLASS (VMOVSDZrm addr:$src), VR128X)>;
+            (VMOVSDZrm addr:$src)>;
   def : Pat<(v2f64 (X86vzmovl (loadv2f64 addr:$src))),
-            (COPY_TO_REGCLASS (VMOVSDZrm addr:$src), VR128X)>;
-  def : Pat<(v2f64 (X86vzload addr:$src)),
-            (COPY_TO_REGCLASS (VMOVSDZrm addr:$src), VR128X)>;
+            (VMOVSDZrm addr:$src)>;
 
   // Represent the same patterns above but in the form they appear for
   // 256-bit types
@@ -4409,11 +4393,6 @@ let Predicates = [HasAVX512] in {
   def : Pat<(v4i64 (X86vzmovl (insert_subvector undef,
                    (v2i64 (scalar_to_vector (loadi64 addr:$src))), (iPTR 0)))),
             (SUBREG_TO_REG (i64 0), (v2i64 (VMOVQI2PQIZrm addr:$src)), sub_xmm)>;
-
-  // Extract and store.
-  def : Pat<(store (f32 (extractelt (v4f32 VR128X:$src), (iPTR 0))),
-                   addr:$dst),
-            (VMOVSSZmr addr:$dst, (COPY_TO_REGCLASS (v4f32 VR128X:$src), FR32X))>;
 }
 
 let ExeDomain = SSEPackedInt, SchedRW = [SchedWriteVecLogic.XMM] in {
@@ -5661,51 +5640,6 @@ defm VOR   : avx512_fp_binop_p<0x56, "vor", null_frag, HasDQI,
                                SchedWriteFLogicSizes, 1>;
 defm VXOR  : avx512_fp_binop_p<0x57, "vxor", null_frag, HasDQI,
                                SchedWriteFLogicSizes, 1>;
-
-let Predicates = [HasVLX,HasDQI] in {
-  // Use packed logical operations for scalar ops.
-  def : Pat<(f64 (X86fand FR64X:$src1, FR64X:$src2)),
-            (COPY_TO_REGCLASS
-             (v2f64 (VANDPDZ128rr (v2f64 (COPY_TO_REGCLASS FR64X:$src1, VR128X)),
-                                  (v2f64 (COPY_TO_REGCLASS FR64X:$src2, VR128X)))),
-             FR64X)>;
-  def : Pat<(f64 (X86for FR64X:$src1, FR64X:$src2)),
-            (COPY_TO_REGCLASS
-             (v2f64 (VORPDZ128rr (v2f64 (COPY_TO_REGCLASS FR64X:$src1, VR128X)),
-                                 (v2f64 (COPY_TO_REGCLASS FR64X:$src2, VR128X)))),
-             FR64X)>;
-  def : Pat<(f64 (X86fxor FR64X:$src1, FR64X:$src2)),
-            (COPY_TO_REGCLASS
-             (v2f64 (VXORPDZ128rr (v2f64 (COPY_TO_REGCLASS FR64X:$src1, VR128X)),
-                                  (v2f64 (COPY_TO_REGCLASS FR64X:$src2, VR128X)))),
-             FR64X)>;
-  def : Pat<(f64 (X86fandn FR64X:$src1, FR64X:$src2)),
-            (COPY_TO_REGCLASS
-             (v2f64 (VANDNPDZ128rr (v2f64 (COPY_TO_REGCLASS FR64X:$src1, VR128X)),
-                                   (v2f64 (COPY_TO_REGCLASS FR64X:$src2, VR128X)))),
-             FR64X)>;
-
-  def : Pat<(f32 (X86fand FR32X:$src1, FR32X:$src2)),
-            (COPY_TO_REGCLASS
-             (v4f32 (VANDPSZ128rr (v4f32 (COPY_TO_REGCLASS FR32X:$src1, VR128X)),
-                                  (v4f32 (COPY_TO_REGCLASS FR32X:$src2, VR128X)))),
-             FR32X)>;
-  def : Pat<(f32 (X86for FR32X:$src1, FR32X:$src2)),
-            (COPY_TO_REGCLASS
-             (v4f32 (VORPSZ128rr (v4f32 (COPY_TO_REGCLASS FR32X:$src1, VR128X)),
-                                 (v4f32 (COPY_TO_REGCLASS FR32X:$src2, VR128X)))),
-             FR32X)>;
-  def : Pat<(f32 (X86fxor FR32X:$src1, FR32X:$src2)),
-            (COPY_TO_REGCLASS
-             (v4f32 (VXORPSZ128rr (v4f32 (COPY_TO_REGCLASS FR32X:$src1, VR128X)),
-                                  (v4f32 (COPY_TO_REGCLASS FR32X:$src2, VR128X)))),
-             FR32X)>;
-  def : Pat<(f32 (X86fandn FR32X:$src1, FR32X:$src2)),
-            (COPY_TO_REGCLASS
-             (v4f32 (VANDNPSZ128rr (v4f32 (COPY_TO_REGCLASS FR32X:$src1, VR128X)),
-                                   (v4f32 (COPY_TO_REGCLASS FR32X:$src2, VR128X)))),
-             FR32X)>;
-}
 
 multiclass avx512_fp_scalef_p<bits<8> opc, string OpcodeStr, SDNode OpNode,
                               X86FoldableSchedWrite sched, X86VectorVTInfo _> {
@@ -7571,14 +7505,6 @@ def : Pat<(f64 (fpextend (loadf32 addr:$src))),
           (VCVTSS2SDZrm (f64 (IMPLICIT_DEF)), addr:$src)>,
           Requires<[HasAVX512, OptForSize]>;
 
-def : Pat<(f64 (extloadf32 addr:$src)),
-          (VCVTSS2SDZrm (f64 (IMPLICIT_DEF)), addr:$src)>,
-      Requires<[HasAVX512, OptForSize]>;
-
-def : Pat<(f64 (extloadf32 addr:$src)),
-          (VCVTSS2SDZrr (f64 (IMPLICIT_DEF)), (VMOVSSZrm addr:$src))>,
-          Requires<[HasAVX512, OptForSpeed]>;
-
 def : Pat<(f32 (fpround FR64X:$src)),
           (VCVTSD2SSZrr (f32 (IMPLICIT_DEF)), FR64X:$src)>,
            Requires<[HasAVX512]>;
@@ -9259,39 +9185,15 @@ multiclass avx512_rndscale_scalar<bits<8> opc, string OpcodeStr,
   }
 
   let Predicates = [HasAVX512] in {
-    def : Pat<(ffloor _.FRC:$src),
+    def : Pat<(X86VRndScale _.FRC:$src1, imm:$src2),
               (_.EltVT (!cast<Instruction>(NAME##r) (_.EltVT (IMPLICIT_DEF)),
-               _.FRC:$src, (i32 0x9)))>;
-    def : Pat<(fceil _.FRC:$src),
-              (_.EltVT (!cast<Instruction>(NAME##r) (_.EltVT (IMPLICIT_DEF)),
-               _.FRC:$src, (i32 0xa)))>;
-    def : Pat<(ftrunc _.FRC:$src),
-              (_.EltVT (!cast<Instruction>(NAME##r) (_.EltVT (IMPLICIT_DEF)),
-               _.FRC:$src, (i32 0xb)))>;
-    def : Pat<(frint _.FRC:$src),
-              (_.EltVT (!cast<Instruction>(NAME##r) (_.EltVT (IMPLICIT_DEF)),
-               _.FRC:$src, (i32 0x4)))>;
-    def : Pat<(fnearbyint _.FRC:$src),
-              (_.EltVT (!cast<Instruction>(NAME##r) (_.EltVT (IMPLICIT_DEF)),
-               _.FRC:$src, (i32 0xc)))>;
+               _.FRC:$src1, imm:$src2))>;
   }
 
   let Predicates = [HasAVX512, OptForSize] in {
-    def : Pat<(ffloor (_.ScalarLdFrag addr:$src)),
+    def : Pat<(X86VRndScale (_.ScalarLdFrag addr:$src1), imm:$src2),
               (_.EltVT (!cast<Instruction>(NAME##m) (_.EltVT (IMPLICIT_DEF)),
-               addr:$src, (i32 0x9)))>;
-    def : Pat<(fceil (_.ScalarLdFrag addr:$src)),
-              (_.EltVT (!cast<Instruction>(NAME##m) (_.EltVT (IMPLICIT_DEF)),
-               addr:$src, (i32 0xa)))>;
-    def : Pat<(ftrunc (_.ScalarLdFrag addr:$src)),
-              (_.EltVT (!cast<Instruction>(NAME##m) (_.EltVT (IMPLICIT_DEF)),
-               addr:$src, (i32 0xb)))>;
-    def : Pat<(frint (_.ScalarLdFrag addr:$src)),
-              (_.EltVT (!cast<Instruction>(NAME##m) (_.EltVT (IMPLICIT_DEF)),
-               addr:$src, (i32 0x4)))>;
-    def : Pat<(fnearbyint (_.ScalarLdFrag addr:$src)),
-              (_.EltVT (!cast<Instruction>(NAME##m) (_.EltVT (IMPLICIT_DEF)),
-               addr:$src, (i32 0xc)))>;
+               addr:$src1, imm:$src2))>;
   }
 }
 
@@ -9830,41 +9732,6 @@ multiclass AVX512_pmovx_patterns_base<string OpcPrefix, SDNode ExtOp> {
   }
 }
 
-multiclass AVX512_pmovx_patterns_aext<string OpcPrefix, SDNode ExtOp> :
-    AVX512_pmovx_patterns_base<OpcPrefix, ExtOp> {
-  let Predicates = [HasVLX, HasBWI] in {
-    def : Pat<(v16i16 (ExtOp (v16i8 VR128X:$src))),
-              (!cast<I>(OpcPrefix#BWZ256rr) VR128X:$src)>;
-  }
-
-  let Predicates = [HasVLX] in {
-    def : Pat<(v8i32 (ExtOp (v8i16 VR128X:$src))),
-              (!cast<I>(OpcPrefix#WDZ256rr) VR128X:$src)>;
-
-    def : Pat<(v4i64 (ExtOp (v4i32 VR128X:$src))),
-              (!cast<I>(OpcPrefix#DQZ256rr) VR128X:$src)>;
-  }
-
-  // 512-bit patterns
-  let Predicates = [HasBWI] in {
-    def : Pat<(v32i16 (ExtOp (v32i8 VR256X:$src))),
-              (!cast<I>(OpcPrefix#BWZrr) VR256X:$src)>;
-  }
-  let Predicates = [HasAVX512] in {
-    def : Pat<(v16i32 (ExtOp (v16i8 VR128X:$src))),
-              (!cast<I>(OpcPrefix#BDZrr) VR128X:$src)>;
-    def : Pat<(v16i32 (ExtOp (v16i16 VR256X:$src))),
-              (!cast<I>(OpcPrefix#WDZrr) VR256X:$src)>;
-
-    def : Pat<(v8i64 (ExtOp (v8i16 VR128X:$src))),
-              (!cast<I>(OpcPrefix#WQZrr) VR128X:$src)>;
-
-    def : Pat<(v8i64 (ExtOp (v8i32 VR256X:$src))),
-              (!cast<I>(OpcPrefix#DQZrr) VR256X:$src)>;
-  }
-}
-
-
 multiclass AVX512_pmovx_patterns<string OpcPrefix, SDNode ExtOp,
                                  SDNode InVecOp> :
     AVX512_pmovx_patterns_base<OpcPrefix, ExtOp> {
@@ -9970,7 +9837,6 @@ multiclass AVX512_pmovx_patterns<string OpcPrefix, SDNode ExtOp,
 
 defm : AVX512_pmovx_patterns<"VPMOVSX", sext, sext_invec>;
 defm : AVX512_pmovx_patterns<"VPMOVZX", zext, zext_invec>;
-defm : AVX512_pmovx_patterns_aext<"VPMOVZX", anyext>;
 
 // Without BWI we can't do a trunc from v16i16 to v16i8. DAG combine can merge
 // ext+trunc aggresively making it impossible to legalize the DAG to this
@@ -11953,6 +11819,12 @@ multiclass AVX512_scalar_math_fp_patterns<SDNode Op, string OpcPrefix, SDNode Mo
                           _.FRC:$src)))),
               (!cast<Instruction>("V"#OpcPrefix#Zrr_Int) _.VT:$dst,
                (_.VT (COPY_TO_REGCLASS _.FRC:$src, VR128X)))>;
+    def : Pat<(MoveNode
+               (_.VT VR128X:$dst),
+               (_.VT (scalar_to_vector
+                      (Op (_.EltVT (extractelt (_.VT VR128X:$dst), (iPTR 0))),
+                          (_.ScalarLdFrag addr:$src))))),
+              (!cast<Instruction>("V"#OpcPrefix#Zrm_Int) _.VT:$dst, addr:$src)>;
 
     // extracted masked scalar math op with insert via movss
     def : Pat<(MoveNode (_.VT VR128X:$src1),
@@ -11966,6 +11838,16 @@ multiclass AVX512_scalar_math_fp_patterns<SDNode Op, string OpcPrefix, SDNode Mo
                (_.VT (COPY_TO_REGCLASS _.FRC:$src0, VR128X)),
                VK1WM:$mask, _.VT:$src1,
                (_.VT (COPY_TO_REGCLASS _.FRC:$src2, VR128X)))>;
+    def : Pat<(MoveNode (_.VT VR128X:$src1),
+               (scalar_to_vector
+                (X86selects VK1WM:$mask,
+                            (Op (_.EltVT
+                                 (extractelt (_.VT VR128X:$src1), (iPTR 0))),
+                                (_.ScalarLdFrag addr:$src2)),
+                            _.FRC:$src0))),
+              (!cast<Instruction>("V"#OpcPrefix#Zrm_Intk)
+               (_.VT (COPY_TO_REGCLASS _.FRC:$src0, VR128X)),
+               VK1WM:$mask, _.VT:$src1, addr:$src2)>;
 
     // extracted masked scalar math op with insert via movss
     def : Pat<(MoveNode (_.VT VR128X:$src1),
@@ -11977,6 +11859,13 @@ multiclass AVX512_scalar_math_fp_patterns<SDNode Op, string OpcPrefix, SDNode Mo
       (!cast<I>("V"#OpcPrefix#Zrr_Intkz) 
           VK1WM:$mask, _.VT:$src1,
           (_.VT (COPY_TO_REGCLASS _.FRC:$src2, VR128X)))>;
+    def : Pat<(MoveNode (_.VT VR128X:$src1),
+               (scalar_to_vector
+                (X86selects VK1WM:$mask,
+                            (Op (_.EltVT
+                                 (extractelt (_.VT VR128X:$src1), (iPTR 0))),
+                                (_.ScalarLdFrag addr:$src2)), (_.EltVT ZeroFP)))),
+      (!cast<I>("V"#OpcPrefix#Zrm_Intkz) VK1WM:$mask, _.VT:$src1, addr:$src2)>;
   }
 }
 

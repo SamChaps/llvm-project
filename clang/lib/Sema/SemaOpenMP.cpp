@@ -1576,7 +1576,9 @@ void Sema::checkOpenMPDeviceExpr(const Expr *E) {
          "OpenMP device compilation mode is expected.");
   QualType Ty = E->getType();
   if ((Ty->isFloat16Type() && !Context.getTargetInfo().hasFloat16Type()) ||
-      (Ty->isFloat128Type() && !Context.getTargetInfo().hasFloat128Type()) ||
+      ((Ty->isFloat128Type() ||
+        (Ty->isRealFloatingType() && Context.getTypeSize(Ty) == 128)) &&
+       !Context.getTargetInfo().hasFloat128Type()) ||
       (Ty->isIntegerType() && Context.getTypeSize(Ty) == 128 &&
        !Context.getTargetInfo().hasInt128Type()))
     targetDiag(E->getExprLoc(), diag::err_type_unsupported)
@@ -2667,7 +2669,8 @@ public:
       llvm::Optional<OMPDeclareTargetDeclAttr::MapTypeTy> Res =
           OMPDeclareTargetDeclAttr::isDeclareTargetDeclaration(VD);
       if (VD->hasGlobalStorage() && CS && !CS->capturesVariable(VD) &&
-          (!Res || *Res != OMPDeclareTargetDeclAttr::MT_Link))
+          (Stack->hasRequiresDeclWithClause<OMPUnifiedSharedMemoryClause>() ||
+           !Res || *Res != OMPDeclareTargetDeclAttr::MT_Link))
         return;
 
       SourceLocation ELoc = E->getExprLoc();

@@ -54,7 +54,7 @@ public:
 
   DWARFDebugInfoEntry *GetDIE() const { return m_die; }
 
-  DIERef GetDIERef() const;
+  llvm::Optional<DIERef> GetDIERef() const;
 
   lldb_private::TypeSystem *GetTypeSystem() const;
 
@@ -100,8 +100,6 @@ public:
   lldb::LanguageType GetLanguage() const;
 
   lldb::ModuleSP GetModule() const;
-
-  lldb_private::CompileUnit *GetLLDBCompileUnit() const;
 
   // Getting attribute values from the DIE.
   //

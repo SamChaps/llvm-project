@@ -179,6 +179,12 @@ MachineInstrBuilder MachineIRBuilder::buildGlobalValue(unsigned Res,
       .addGlobalAddress(GV);
 }
 
+MachineInstrBuilder MachineIRBuilder::buildJumpTable(const LLT PtrTy,
+                                                     unsigned JTI) {
+  return buildInstr(TargetOpcode::G_JUMP_TABLE, {PtrTy}, {})
+      .addJumpTableIndex(JTI);
+}
+
 void MachineIRBuilder::validateBinaryOp(const LLT &Res, const LLT &Op0,
                                         const LLT &Op1) {
   assert((Res.isScalar() || Res.isVector()) && "invalid operand type");
@@ -237,6 +243,17 @@ MachineInstrBuilder MachineIRBuilder::buildBr(MachineBasicBlock &Dest) {
 MachineInstrBuilder MachineIRBuilder::buildBrIndirect(unsigned Tgt) {
   assert(getMRI()->getType(Tgt).isPointer() && "invalid branch destination");
   return buildInstr(TargetOpcode::G_BRINDIRECT).addUse(Tgt);
+}
+
+MachineInstrBuilder MachineIRBuilder::buildBrJT(unsigned TablePtr,
+                                                unsigned JTI,
+                                                unsigned IndexReg) {
+  assert(getMRI()->getType(TablePtr).isPointer() &&
+         "Table reg must be a pointer");
+  return buildInstr(TargetOpcode::G_BRJT)
+      .addUse(TablePtr)
+      .addJumpTableIndex(JTI)
+      .addUse(IndexReg);
 }
 
 MachineInstrBuilder MachineIRBuilder::buildCopy(const DstOp &Res,

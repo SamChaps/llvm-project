@@ -1,9 +1,8 @@
-//===-- ClangScanDeps.cpp - Implementation of clang-scan-deps -------------===//
+//===- ClangScanDeps.cpp - Implementation of clang-scan-deps --------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 
@@ -16,14 +15,15 @@
 #include "clang/Tooling/JSONCompilationDatabase.h"
 #include "clang/Tooling/Tooling.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/Options.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/Threading.h"
+#include <mutex>
 #include <thread>
-#include <windows.h>
 
 #define SCANDEPSPLUGIN_DLL_EXPORT __declspec(dllexport)
 #include "ScanDepsPluginInterface.h"
@@ -141,15 +141,14 @@ llvm::cl::opt<std::string>
 } // end anonymous namespace
 
 int main(int argc, const char **argv) {
-
-  llvm::cl::ResetAllOptionOccurrences();
+  llvm::InitLLVM X(argc, argv);
   llvm::cl::HideUnrelatedOptions(DependencyScannerCategory);
-  
-  //if (!llvm::cl::ParseCommandLineOptions(argc, argv))
+  // if (!llvm::cl::ParseCommandLineOptions(argc, argv))
   //  return 1;
+
   std::string ErrorMessage;
   std::unique_ptr<tooling::JSONCompilationDatabase> Compilations =
-      tooling::JSONCompilationDatabase::loadFromBuffer(
+      tooling::JSONCompilationDatabase::loadFromFile(
           argv[2], ErrorMessage,
           tooling::JSONCommandLineSyntax::AutoDetect);
   if (!Compilations) {

@@ -143,7 +143,7 @@ protected:
 
 public:
   enum TargetOperandFlags {
-    MO_MASK = 0x7,
+    MO_MASK = 0xf,
 
     MO_NONE = 0,
     // MO_GOTPCREL -> symbol@GOTPCREL -> R_AMDGPU_GOTPCREL.
@@ -160,7 +160,10 @@ public:
     MO_REL32_HI = 5,
 
     MO_LONG_BRANCH_FORWARD = 6,
-    MO_LONG_BRANCH_BACKWARD = 7
+    MO_LONG_BRANCH_BACKWARD = 7,
+
+    MO_ABS32_LO = 8,
+    MO_ABS32_HI = 9,
   };
 
   explicit SIInstrInfo(const GCNSubtarget &ST);
@@ -942,6 +945,8 @@ public:
   /// Return -1 if the target-specific opcode for the pseudo instruction does
   /// not exist. If Opcode is not a pseudo instruction, this is identity.
   int pseudoToMCOpcode(int Opcode) const;
+
+  void fixImplicitOperands(MachineInstr &MI) const;
 };
 
 /// \brief Returns true if a reg:subreg pair P has a TRC class
@@ -972,11 +977,14 @@ TargetInstrInfo::RegSubRegPair getRegSequenceSubReg(MachineInstr &MI,
 MachineInstr *getVRegSubRegDef(const TargetInstrInfo::RegSubRegPair &P,
                                MachineRegisterInfo &MRI);
 
-/// \brief Return true if EXEC mask isnt' changed between the def and
-/// all uses of VReg. Currently if def and uses are in different BBs -
-/// simply return false. Should be run on SSA.
-bool isEXECMaskConstantBetweenDefAndUses(unsigned VReg,
-                                         MachineRegisterInfo &MRI);
+/// \brief Return false if EXEC is not changed between the def of \p VReg at \p
+/// DefMI and uses. If \p UseMI is not specified, this checks all uses of \p
+/// VReg. Should be run on SSA. Currently does not attempt to track between
+/// blocks.
+bool execMayBeModifiedBeforeUse(const MachineRegisterInfo &MRI,
+                                unsigned VReg,
+                                const MachineInstr &DefMI,
+                                const MachineInstr *UseMI = nullptr);
 
 namespace AMDGPU {
 

@@ -367,6 +367,16 @@ def reglist : Operand<i32> {
   let DecoderMethod = "DecodeRegListOperand";
 }
 
+// A list of general purpose registers and APSR separated by comma.
+// Used by CLRM
+def RegListWithAPSRAsmOperand : AsmOperandClass { let Name = "RegListWithAPSR"; }
+def reglist_with_apsr : Operand<i32> {
+  let EncoderMethod = "getRegisterListOpValue";
+  let ParserMatchClass = RegListWithAPSRAsmOperand;
+  let PrintMethod = "printRegisterList";
+  let DecoderMethod = "DecodeRegListOperand";
+}
+
 def GPRPairOp : RegisterOperand<GPRPair, "printGPRPairOperand">;
 
 def DPRRegListAsmOperand : AsmOperandClass {
@@ -389,6 +399,21 @@ def spr_reglist : Operand<i32> {
   let ParserMatchClass = SPRRegListAsmOperand;
   let PrintMethod = "printRegisterList";
   let DecoderMethod = "DecodeSPRRegListOperand";
+}
+
+def FPSRegListWithVPRAsmOperand : AsmOperandClass { let Name =
+    "FPSRegListWithVPR"; }
+def fp_sreglist_with_vpr : Operand<i32> {
+  let EncoderMethod = "getRegisterListOpValue";
+  let ParserMatchClass = FPSRegListWithVPRAsmOperand;
+  let PrintMethod = "printRegisterList";
+}
+def FPDRegListWithVPRAsmOperand : AsmOperandClass { let Name =
+    "FPDRegListWithVPR"; }
+def fp_dreglist_with_vpr : Operand<i32> {
+  let EncoderMethod = "getRegisterListOpValue";
+  let ParserMatchClass = FPDRegListWithVPRAsmOperand;
+  let PrintMethod = "printRegisterList";
 }
 
 // An operand for the CONSTPOOL_ENTRY pseudo-instruction.
@@ -434,6 +459,19 @@ def rot_imm : Operand<i32>, PatLeaf<(i32 imm), [{
     rot_imm_XFORM> {
   let PrintMethod = "printRotImmOperand";
   let ParserMatchClass = RotImmAsmOperand;
+}
+
+// Vector indexing
+class MVEVectorIndexOperand<int NumLanes> : AsmOperandClass {
+  let Name = "MVEVectorIndex"#NumLanes;
+  let RenderMethod = "addMVEVectorIndexOperands";
+  let PredicateMethod = "isVectorIndexInRange<"#NumLanes#">";
+}
+
+class MVEVectorIndex<int NumLanes> : Operand<i32> {
+  let PrintMethod = "printVectorIndex";
+  let ParserMatchClass = MVEVectorIndexOperand<NumLanes>;
+  let MIOperandInfo = (ops i32imm);
 }
 
 // shift_imm: An integer that encodes a shift amount and the type of shift
@@ -752,6 +790,32 @@ def imm1_16 : Operand<i32>, ImmLeaf<i32, [{
     imm1_16_XFORM> {
   let PrintMethod = "printImmPlusOneOperand";
   let ParserMatchClass = Imm1_16AsmOperand;
+}
+
+def MVEShiftImm1_7AsmOperand: ImmAsmOperand<1,7> {
+  let Name = "MVEShiftImm1_7";
+  // Reason we're doing this is because instruction vshll.s8 t1 encoding
+  // accepts 1,7 but the t2 encoding accepts 8.  By doing this we can get a
+  // better diagnostic message if someone uses bigger immediate than the t1/t2
+  // encodings allow.
+  let DiagnosticString = "operand must be an immediate in the range [1,8]";
+}
+def mve_shift_imm1_7 : Operand<i32> {
+  let ParserMatchClass = MVEShiftImm1_7AsmOperand;
+  let EncoderMethod = "getMVEShiftImmOpValue";
+}
+
+def MVEShiftImm1_15AsmOperand: ImmAsmOperand<1,15> {
+  let Name = "MVEShiftImm1_15";
+  // Reason we're doing this is because instruction vshll.s16 t1 encoding
+  // accepts 1,15 but the t2 encoding accepts 16.  By doing this we can get a
+  // better diagnostic message if someone uses bigger immediate than the t1/t2
+  // encodings allow.
+  let DiagnosticString = "operand must be an immediate in the range [1,16]";
+}
+def mve_shift_imm1_15 : Operand<i32> {
+  let ParserMatchClass = MVEShiftImm1_15AsmOperand;
+  let EncoderMethod = "getMVEShiftImmOpValue";
 }
 
 // Define ARM specific addressing modes.
@@ -5732,6 +5796,12 @@ include "ARMInstrVFP.td"
 //
 
 include "ARMInstrNEON.td"
+
+//===----------------------------------------------------------------------===//
+// MVE Support
+//
+
+include "ARMInstrMVE.td"
 
 //===----------------------------------------------------------------------===//
 // Assembler aliases
