@@ -141,14 +141,14 @@ llvm::cl::opt<std::string>
 } // end anonymous namespace
 
 int main(int argc, const char **argv) {
-  llvm::InitLLVM X(argc, argv);
+  llvm::cl::ResetAllOptionOccurrences();
   llvm::cl::HideUnrelatedOptions(DependencyScannerCategory);
-  // if (!llvm::cl::ParseCommandLineOptions(argc, argv))
+  
+  //if (!llvm::cl::ParseCommandLineOptions(argc, argv))
   //  return 1;
-
   std::string ErrorMessage;
   std::unique_ptr<tooling::JSONCompilationDatabase> Compilations =
-      tooling::JSONCompilationDatabase::loadFromFile(
+      tooling::JSONCompilationDatabase::loadFromBuffer(
           argv[2], ErrorMessage,
           tooling::JSONCommandLineSyntax::AutoDetect);
   if (!Compilations) {
